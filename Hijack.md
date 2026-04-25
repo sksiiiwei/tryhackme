@@ -216,6 +216,7 @@ if __name__ == "__main__":
 Фильтр обходится через %0a. Далее опрокидываем себе реверс шелл и получаем шелл
 
 <img width="1347" height="212" alt="image" src="https://github.com/user-attachments/assets/d1ef2d72-d692-4a90-a311-3890220a4000" />
+
 <img width="761" height="51" alt="image" src="https://github.com/user-attachments/assets/ca340642-8216-450f-813c-1911b5c50c24" />
 
 ### Взятие юзера
