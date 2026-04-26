@@ -1,2 +1,2 @@
 # tryhackme
-just some demostration my work on labs
+just some demostration of lab solutions on thm:)
