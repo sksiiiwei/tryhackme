@@ -51,7 +51,7 @@ sqlmap -r req  \
 
 <img width="600" height="100" alt="image" src="https://github.com/user-attachments/assets/20946329-2257-43ca-8e02-29a410bee615" />
 
-Монтируем к себе файловую систему, беря любой образ из доступных (смотрим их через ```docker images```)
+Создаем докер контейнер, куда монтируем файловую систему хоста, беря любой образ из доступных (смотрим их через ```docker images```)
 
 <img width="600" height="100" alt="image" src="https://github.com/user-attachments/assets/5842843e-8cdb-41f5-892a-4ff448ef6756" />
 
