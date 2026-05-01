@@ -7,7 +7,7 @@
 
 <img width="697" height="334" alt="image" src="https://github.com/user-attachments/assets/276a9659-a3c8-46c5-9d13-8ac0c1dbc6b9" />
 
-Делать нечего - фаззим оба сервера. На первом выдало несколько поддиректорий, типа /admin, /shadow - в них зашифрованный на base64 текст для прикольчика. но сервер 
+Делать нечего - фаззим оба. На первом выдало несколько поддиректорий, типа /admin, /shadow - в них зашифрованный на base64 текст для прикольчика. но сервер 
 на 445 порту наконец выдал полезную директорию - /managment. переходим по адресу ```http://ip:445/management``` и наконец видим сайт
 
 <img width="855" height="565" alt="image" src="https://github.com/user-attachments/assets/6ab49d06-5072-4327-8f63-37f21ddac547" />
