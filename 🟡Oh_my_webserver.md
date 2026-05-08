@@ -194,6 +194,7 @@ Payload options (linux/x64/meterpreter/reverse_tcp):
 
 ```
 пишем ```run```, запускаем эксплойт и ловим рута на хосте!😎 
+
 <img width="374" height="112" alt="image" src="https://github.com/user-attachments/assets/96626f29-d585-4ae3-809b-5a68d0274a2d" />
 
 p.s. в итоге даже сайт не посмотрела ведь апхпхапх
