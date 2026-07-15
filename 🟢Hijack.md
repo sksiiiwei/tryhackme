@@ -11,7 +11,7 @@
 
 ### Доступ к системе
 
-Начнём с разведки — сканирование портов:
+Начинаем со сканирования портов:
 
 ```
 sudo nmap -sV -sC 10.112.138.240
@@ -61,45 +61,45 @@ PORT     STATE SERVICE VERSION
 Service Info: OSs: Unix, Linux; CPE: cpe:/o:linux:linux_kernel
 ```
 
-Осматриваем веб-сервис на 80 порту; параллельно запускаем фаззинг директорий — без результата.
+Смотрим веб-сервис на 80 порту, параллельно запускаем фаззинг директорий — без результата.
 
-[![image](https://private-user-images.githubusercontent.com/260275793/583796947-d308331d-4fa5-430b-b7bd-b6b31ac3908d.png)](https://private-user-images.githubusercontent.com/260275793/583796947-d308331d-4fa5-430b-b7bd-b6b31ac3908d.png)
+<img width="761" height="622" alt="image" src="https://github.com/user-attachments/assets/d308331d-4fa5-430b-b7bd-b6b31ac3908d" />
 
 Сайт небольшой: стандартная форма входа и административная панель, доступ к которой ограничен (`only the admin can access this page`). Тестирование формы через sqlmap, анализ запросов в Burp Suite и просмотр исходного кода страниц не дали результата.
 
-[![image](https://private-user-images.githubusercontent.com/260275793/583797638-852c4695-6bfa-4597-a369-c9eb8ff42e4c.png)](https://private-user-images.githubusercontent.com/260275793/583797638-852c4695-6bfa-4597-a369-c9eb8ff42e4c.png)
+<img width="761" height="193" alt="image" src="https://github.com/user-attachments/assets/852c4695-6bfa-4597-a369-c9eb8ff42e4c" />
 
 Форма регистрации раскрывает информацию о существующих именах пользователей (username enumeration). Однако брутфорс по форме входа недоступен — на ввод пароля установлен лимит в 5 попыток.
 
-[![image](https://private-user-images.githubusercontent.com/260275793/583798541-fd0132c8-ba96-44cb-abfc-f7e110d12672.png)](https://private-user-images.githubusercontent.com/260275793/583798541-fd0132c8-ba96-44cb-abfc-f7e110d12672.png)
+<img width="761" height="259" alt="image" src="https://github.com/user-attachments/assets/fd0132c8-ba96-44cb-abfc-f7e110d12672" />
 
 Возвращаемся к открытым портам. Обнаружен NFS — проверяем доступные шары:
 
 `showmount -e 10.112.138.240`
 
-Доступна директория `/var/share/mount *`. Монтируем её локально:
+Экспортируется `/var/share/mount` с wildcard `*`. Монтируем локально:
 
 `sudo mount -t nfs 10.112.138.240:/var/share/mount /tmp/server_files`
 
-Открыть директорию не удаётся даже от root — NFS применяет проверку по UID, и файлы принадлежат пользователю с UID 1003. Создаём локального пользователя с тем же UID:
+Открыть директорию не удаётся даже от root — файлы принадлежат пользователю с UID 1003. NFS авторизует по UID, а не по имени, поэтому создаём локального пользователя с нужным UID:
 
 `sudo useradd -u 1003 test`
 
-Читаем содержимое шары от имени созданного пользователя. В `/etc/exports` не настроен `all_squash`, что позволяет такое сопоставление. Получаем учётные данные от FTP.
+В `/etc/exports` не настроен `all_squash` — наш `test` получает доступ. Читаем содержимое шары, находим учётные данные от FTP.
 
-[![image](https://private-user-images.githubusercontent.com/260275793/583802830-26d9f605-bae1-4c0b-861c-c9790cdbcf59.png)](https://private-user-images.githubusercontent.com/260275793/583802830-26d9f605-bae1-4c0b-861c-c9790cdbcf59.png)
+<img width="761" height="432" alt="image" src="https://github.com/user-attachments/assets/26d9f605-bae1-4c0b-861c-c9790cdbcf59" />
 
 Подключаемся по FTP и выгружаем все файлы. В архиве — список из 150 паролей и сообщение от администратора:
 
-[![image](https://private-user-images.githubusercontent.com/260275793/583803331-2bcd5238-283e-4e1d-aaaf-6ad618c6d2e6.png)](https://private-user-images.githubusercontent.com/260275793/583803331-2bcd5238-283e-4e1d-aaaf-6ad618c6d2e6.png)
+<img width="761" height="200" alt="image" src="https://github.com/user-attachments/assets/2bcd5238-283e-4e1d-aaaf-6ad618c6d2e6" />
 
-Брутфорс через форму входа по-прежнему недоступен. Проверка XXE-инъекции через `application/xml` в Content-Type — сервер фильтрует такие запросы.
+Брутфорсить через форму по-прежнему нельзя. Пробуем XXE-инъекцию (в запросах мелькает `application/xml` в Content-Type) — сервер фильтрует.
 
-Возвращаемся к зарегистрированному аккаунту. На первый взгляд в нём ничего нет — однако это само по себе указывает на то, что вектор атаки проходит через сессионные данные. Анализируем cookie:
+Когда остальные векторы не дали результата, возвращаемся к зарегистрированному аккаунту. В личном кабинете ничего полезного, но есть ещё один интересный элемент — сессионная cookie. Смотрим на неё:
 
-[![image](https://private-user-images.githubusercontent.com/260275793/583805506-8d4e4304-f812-46e8-bbd7-a784f0bbd5a3.png)](https://private-user-images.githubusercontent.com/260275793/583805506-8d4e4304-f812-46e8-bbd7-a784f0bbd5a3.png)
+<img width="287" height="255" alt="image" src="https://github.com/user-attachments/assets/8d4e4304-f812-46e8-bbd7-a784f0bbd5a3" />
 
-Cookie представляет собой Base64-закодированную строку вида `username:md5(password)`. Это открывает возможность для офлайн-брутфорса: вместо попыток входа через форму генерируем корректные cookie и отправляем их напрямую, обходя ограничение на количество попыток.
+Cookie — это Base64 от строки `username:md5(password)`. Декодируем, проверяем гипотезу — всё сходится. Это означает, что можно делать брутфорс не через форму входа (там стоит лимит в 5 попыток), а напрямую: для каждого пароля из списка формируем корректную cookie и отправляем GET-запрос. Никаких ограничений по количеству запросов при таком подходе нет.
 
 Пишем скрипт на Python:
 
@@ -231,24 +231,24 @@ if __name__ == "__main__":
 python script.py http://10.112.138.240 admin passwords.txt --fail "Welcome Guest"
 ```
 
-Пароль найден. Входим в административную панель — доступна командная строка, что явно указывает на возможность command injection.
+Пароль найден. Входим в административную панель — там есть поле для ввода команд. Проверяем command injection.
 
-[![image](https://private-user-images.githubusercontent.com/260275793/583811474-f8d80b59-d692-4e9d-8365-3a2272fbcba8.png)](https://private-user-images.githubusercontent.com/260275793/583811474-f8d80b59-d692-4e9d-8365-3a2272fbcba8.png)
+<img width="761" height="355" alt="image" src="https://github.com/user-attachments/assets/f8d80b59-d692-4e9d-8365-3a2272fbcba8" />
 
-Фильтр обходится через `%0a` (URL-encoded newline). Получаем reverse shell:
+Инъекция работает, но с фильтром — обходим через `%0a` (URL-encoded newline). Ловим reverse shell:
 
-[![image](https://private-user-images.githubusercontent.com/260275793/583813063-d1ef2d72-d692-4a90-a311-3890220a4000.png)](https://private-user-images.githubusercontent.com/260275793/583813063-d1ef2d72-d692-4a90-a311-3890220a4000.png)
-[![image](https://private-user-images.githubusercontent.com/260275793/583813077-ca340642-8216-450f-813c-1911b5c50c24.png)](https://private-user-images.githubusercontent.com/260275793/583813077-ca340642-8216-450f-813c-1911b5c50c24.png)
+<img width="761" height="212" alt="image" src="https://github.com/user-attachments/assets/d1ef2d72-d692-4a90-a311-3890220a4000" />
+<img width="761" height="51" alt="image" src="https://github.com/user-attachments/assets/ca340642-8216-450f-813c-1911b5c50c24" />
 
 ---
 
 ### Взятие юзера
 
-Оказываемся в системе с правами `www-data` в директории с файлами приложения. В `config.php` обнаруживаем учётные данные пользователя rick:
+Оказываемся в системе с правами `www-data` в директории веб-приложения. Первым делом смотрим конфигурационные файлы — туда часто кладут учётные данные для подключения к БД. В `config.php` находим пару логин/пароль пользователя rick.
 
 `su - rick`
 
-Вводим пароль из конфига и читаем `user.txt`.
+Пароль подходит. Переключаемся на rick и читаем `user.txt`.
 
 ---
 
@@ -258,9 +258,9 @@ python script.py http://10.112.138.240 admin passwords.txt --fail "Welcome Guest
 
 `sudo -l`
 
-[![image](https://private-user-images.githubusercontent.com/260275793/583815090-d13d4018-c57f-46a7-b4fd-c0b337eea362.png)](https://private-user-images.githubusercontent.com/260275793/583815090-d13d4018-c57f-46a7-b4fd-c0b337eea362.png)
+<img width="761" height="125" alt="image" src="https://github.com/user-attachments/assets/d13d4018-c57f-46a7-b4fd-c0b337eea362" />
 
-Разрешено запускать Apache от имени root с передачей переменных окружения. Это открывает вектор через `LD_LIBRARY_PATH` — можно подменить динамическую библиотеку, которую загрузит процесс.
+Разрешено запускать Apache от имени root с сохранением переменных окружения (флаг `SETENV` в sudoers). Здесь и кроется уязвимость: через `LD_LIBRARY_PATH` можно указать путь к своей директории, и динамический линковщик при запуске загрузит нашу библиотеку вместо системной — и выполнит её конструктор с правами root.
 
 Создаём вредоносную библиотеку в `/tmp`:
 
@@ -291,4 +291,4 @@ sudo LD_LIBRARY_PATH=/tmp /usr/sbin/apache2 -f /etc/apache2/apache2.conf -d /etc
 
 Root-доступ получен.
 
-[![image](https://private-user-images.githubusercontent.com/260275793/583871307-3c0ae962-7f26-4b15-858b-3b81bf748542.png)](https://private-user-images.githubusercontent.com/260275793/583871307-3c0ae962-7f26-4b15-858b-3b81bf748542.png)
+<img width="761" height="250" alt="image" src="https://github.com/user-attachments/assets/3c0ae962-7f26-4b15-858b-3b81bf748542" />
